@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { FlatList, RefreshControl, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import { palette, spacing, typography, useTheme } from '../theme/theme';
 import { useLiveData } from '../store/rover';
 import { IncidentRow } from '../components/ui';
@@ -9,6 +10,14 @@ import type { Incident, Severity } from '../types';
 
 const SEVERITY_FILTERS: (Severity | 'all')[] = ['all', 'critical', 'high', 'medium', 'low'];
 
+const FILTER_ICONS: Record<Severity | 'all', keyof typeof Ionicons.glyphMap> = {
+  all: 'apps',
+  critical: 'alert',
+  high: 'alert-circle',
+  medium: 'warning',
+  low: 'information-circle',
+};
+
 export const IncidentsScreen = ({ navigation }: any) => {
   const c = useTheme();
   const incidents = useLiveData((s) => s.incidents);
@@ -16,13 +25,13 @@ export const IncidentsScreen = ({ navigation }: any) => {
   const markSeen = useLiveData((s) => s.markSeen);
   const [severity, setSeverity] = useState<Severity | 'all'>('all');
   const [hideResolved, setHideResolved] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState(false);
 
   // Clear unread badge when user views the timeline (PRD §6.4.1)
   useEffect(() => {
     markSeen();
   }, [markSeen]);
-  const [refreshing, setRefreshing] = useState(false);
-  const [loadError, setLoadError] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -47,44 +56,63 @@ export const IncidentsScreen = ({ navigation }: any) => {
   const filtered = incidents.filter(
     (i: Incident) => (severity === 'all' || i.severity === severity) && (!hideResolved || i.status === 'open'),
   );
+  const openCount = filtered.filter((i) => i.status === 'open').length;
 
   return (
     <SafeAreaView style={styles.safe} edges={['left', 'right']}>
-      <View style={styles.header}>
-        <Text style={[typography.h1, { color: c.text }]}>Incidents</Text>
-        <Text
-          onPress={() => setHideResolved((v) => !v)}
-          style={[styles.resolveToggle, { color: hideResolved ? c.primary : c.textMuted }]}
-          accessibilityRole="button"
-          accessibilityLabel="Toggle hide resolved"
-        >
-          {hideResolved ? 'Showing open only' : 'Showing all'}
-        </Text>
+      <View style={styles.headerRow}>
+        <View>
+          <Text style={[typography.caption, { color: c.textMuted, letterSpacing: 1.2 }]}>SECURITY LOG</Text>
+          <Text style={[typography.h1, { color: c.text, fontSize: 26 }]}>Incidents</Text>
+        </View>
+        <View style={[styles.countChip, { backgroundColor: openCount > 0 ? `${palette.threatCritical}14` : `${palette.threatLow}14` }]}>
+          <Ionicons name={openCount > 0 ? 'alert' : 'checkmark-circle'} size={13} color={openCount > 0 ? palette.threatCritical : palette.threatLow} />
+          <Text style={{ color: openCount > 0 ? palette.threatCritical : palette.threatLow, fontSize: 11, fontWeight: '800' }}>
+            {openCount} OPEN
+          </Text>
+        </View>
       </View>
 
-      <View style={styles.filters}>
-        {SEVERITY_FILTERS.map((s) => {
-          const active = severity === s;
-          return (
-            <Text
-              key={s}
-              onPress={() => setSeverity(s)}
-              style={[
-                styles.chip,
-                { backgroundColor: active ? c.primary : c.surface, color: active ? 'white' : c.text },
-              ]}
-              accessibilityRole="button"
-              accessibilityLabel={'Filter ' + s}
-            >
-              {s.toUpperCase()}
-            </Text>
-          );
-        })}
+      <View style={styles.filtersRow}>
+        <FlatList
+          horizontal
+          data={SEVERITY_FILTERS}
+          keyExtractor={(s) => s}
+          showsHorizontalScrollIndicator={false}
+          renderItem={({ item }) => {
+            const active = severity === item;
+            return (
+              <View
+                style={[styles.chip, { backgroundColor: active ? c.primary : c.surface, borderColor: active ? c.primary : c.border }]}
+              >
+                <Text onPress={() => setSeverity(item)} style={[styles.chipText, { color: active ? 'white' : c.textMuted }]} accessibilityRole="button" accessibilityLabel={'Filter ' + item}>
+                  {item.toUpperCase()}
+                </Text>
+                <Ionicons name={FILTER_ICONS[item]} size={11} color={active ? 'white' : c.textMuted} />
+              </View>
+            );
+          }}
+          style={{ flexGrow: 0 }}
+        />
+        <View
+          style={[styles.chip, { backgroundColor: hideResolved ? palette.threatLow : c.surface, borderColor: hideResolved ? palette.threatLow : c.border }]}
+        >
+          <Text
+            onPress={() => setHideResolved((v) => !v)}
+            style={[styles.chipText, { color: hideResolved ? 'white' : c.textMuted }]}
+            accessibilityRole="button"
+            accessibilityLabel="Toggle hide resolved"
+          >
+            {hideResolved ? 'OPEN ONLY' : 'ALL STATUS'}
+          </Text>
+          <Ionicons name="filter" size={11} color={hideResolved ? 'white' : c.textMuted} />
+        </View>
       </View>
 
       {loadError && incidents.length === 0 ? (
         <View style={styles.empty}>
-          <Text style={[typography.body, { color: c.textMuted }]}>
+          <Ionicons name="cloud-offline" size={40} color={c.textMuted} />
+          <Text style={[typography.body, { color: c.textMuted, textAlign: 'center', marginTop: spacing.md }]}>
             No incident backend reachable.{'\n'}Enable Demo Mode in Settings to simulate incidents.
           </Text>
         </View>
@@ -99,7 +127,8 @@ export const IncidentsScreen = ({ navigation }: any) => {
           contentContainerStyle={styles.list}
           ListEmptyComponent={
             <View style={styles.empty}>
-              <Text style={[typography.body, { color: c.textMuted }]}>No incidents match the current filters.</Text>
+              <Ionicons name="checkmark-done-circle" size={40} color={palette.threatLow} />
+              <Text style={[typography.body, { color: c.textMuted, marginTop: spacing.md }]}>No incidents match the current filters.</Text>
             </View>
           }
         />
@@ -110,10 +139,11 @@ export const IncidentsScreen = ({ navigation }: any) => {
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: spacing.lg, paddingTop: spacing.md },
-  resolveToggle: { fontSize: 13, fontWeight: '700' },
-  filters: { flexDirection: 'row', gap: spacing.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
-  chip: { paddingHorizontal: 12, paddingVertical: 5, borderRadius: 999, fontSize: 11, fontWeight: '800', overflow: 'hidden' },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingHorizontal: spacing.lg, paddingTop: spacing.md },
+  countChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999 },
+  filtersRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingHorizontal: spacing.lg, paddingVertical: spacing.md },
+  chip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 11, paddingVertical: 7, borderRadius: 999, borderWidth: 1, marginRight: spacing.sm },
+  chipText: { fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
   list: { padding: spacing.lg, paddingTop: 0 },
   empty: { padding: spacing.xl, alignItems: 'center' },
 });
