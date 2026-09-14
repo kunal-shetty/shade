@@ -1,5 +1,7 @@
-import React, { useCallback, useRef, useState } from 'react';
-import { AccessibilityInfo, PanResponder, StyleSheet, Text, View } from 'react-native';
+import React, { useRef, useState } from 'react';
+import { PanResponder, StyleSheet, View } from 'react-native';
+import { LinearGradient } from 'expo-linear-gradient';
+import { Ionicons } from '@expo/vector-icons';
 import { palette, useTheme } from '../theme/theme';
 
 const SIZE = 220;
@@ -68,17 +70,25 @@ export const JoystickPad = ({ onMove, onStop, disabled }: JoystickPadProps) => {
     >
       <View style={[styles.innerRing, { borderColor: c.border }]} />
       <View style={styles.crossWrap} pointerEvents="none">
-        {['F', 'R', 'B', 'L'].map((l) => (
-          <Text key={l} style={[styles.axisLabel, { color: c.textMuted }]}>{l}</Text>
-        ))}
+        <View style={[styles.axisChip, { backgroundColor: c.card, borderColor: c.border }]}><Ionicons name="chevron-up" size={13} color={c.textMuted} /></View>
+        <View style={[styles.axisChip, { backgroundColor: c.card, borderColor: c.border }]}><Ionicons name="chevron-forward" size={13} color={c.textMuted} /></View>
+        <View style={[styles.axisChip, { backgroundColor: c.card, borderColor: c.border }]}><Ionicons name="chevron-down" size={13} color={c.textMuted} /></View>
+        <View style={[styles.axisChip, { backgroundColor: c.card, borderColor: c.border }]}><Ionicons name="chevron-back" size={13} color={c.textMuted} /></View>
       </View>
       <View
         style={[
           styles.knob,
-          { transform: [{ translateX: knob.x }, { translateY: knob.y }], backgroundColor: disabled ? c.border : c.primary },
+          { transform: [{ translateX: knob.x }, { translateY: knob.y }] },
         ]}
       >
-        <Text style={styles.knobText}>{disabled ? '🔒' : '⇔'}</Text>
+        <LinearGradient
+          colors={disabled ? ['#64748B', '#475569'] : active ? [palette.accent, '#0284C7'] : [palette.primary, '#12439E']}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 0, y: 1 }}
+          style={styles.knobGrad}
+        >
+          <Ionicons name={disabled ? 'lock-closed' : 'open'} size={24} color="white" />
+        </LinearGradient>
       </View>
     </View>
   );
@@ -93,13 +103,12 @@ const styles = StyleSheet.create({
   innerRing: { position: 'absolute', width: RADIUS, height: RADIUS, borderRadius: RADIUS / 2, borderWidth: 1.5 },
   crossWrap: {
     position: 'absolute', width: SIZE, height: SIZE, alignItems: 'center', justifyContent: 'space-between',
-    paddingVertical: 14,
+    paddingVertical: 10,
   },
-  axisLabel: { fontSize: 12, fontWeight: '800' },
+  axisChip: { width: 26, height: 26, borderRadius: 13, borderWidth: 1, alignItems: 'center', justifyContent: 'center' },
   knob: {
     width: KNOB, height: KNOB, borderRadius: KNOB / 2,
-    alignItems: 'center', justifyContent: 'center',
-    shadowColor: '#000', shadowOpacity: 0.3, shadowRadius: 6, shadowOffset: { width: 0, height: 3 }, elevation: 5,
+    shadowColor: '#000', shadowOpacity: 0.35, shadowRadius: 8, shadowOffset: { width: 0, height: 4 }, elevation: 6,
   },
-  knobText: { color: 'white', fontSize: 22 },
+  knobGrad: { width: KNOB, height: KNOB, borderRadius: KNOB / 2, alignItems: 'center', justifyContent: 'center' },
 });
