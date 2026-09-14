@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import Svg, { Circle, Polygon, Rect, Text as SvgText } from 'react-native-svg';
 import { palette, spacing, typography, useTheme } from '../theme/theme';
 import { useLiveData } from '../store/rover';
@@ -51,8 +52,18 @@ export const ZoneMapScreen = () => {
   return (
     <SafeAreaView style={styles.safe} edges={['left', 'right']}>
       <View style={styles.header}>
-        <Text style={[typography.h1, { color: c.text }]}>Zone Map</Text>
-        <Text style={[typography.caption, { color: c.textMuted }]}>Discrete zone positioning (pre-SLAM)</Text>
+        <View>
+          <Text style={[typography.caption, { color: c.textMuted, letterSpacing: 1.2 }]}>SPATIAL OVERVIEW</Text>
+          <Text style={[typography.h1, { color: c.text, fontSize: 26 }]}>Zone Map</Text>
+        </View>
+        <View style={[styles.mapChip, { backgroundColor: motionActive ? `${palette.threatCritical}16` : `${palette.threatLow}16` }]}
+          accessibilityLabel={motionActive ? 'Motion active in zone' : 'No motion detected'}
+        >
+          <Ionicons name={motionActive ? 'alert' : 'checkmark-circle'} size={13} color={motionActive ? palette.threatCritical : palette.threatLow} />
+          <Text style={{ color: motionActive ? palette.threatCritical : palette.threatLow, fontSize: 11, fontWeight: '800' }}>
+            {motionActive ? 'MOTION' : 'CLEAR'}
+          </Text>
+        </View>
       </View>
 
       <View style={[styles.mapCard, { backgroundColor: c.card, borderColor: c.border }]}>
@@ -111,9 +122,12 @@ export const ZoneMapScreen = () => {
       <View style={[styles.legend, { backgroundColor: c.card, borderColor: c.border }]}>
         {selected ? (
           <View style={{ gap: 2 }}>
-            <Text style={[typography.body, { color: c.text, fontWeight: '700' }]}>
-              {selected.label} — {sensors[selected.id]?.value ?? 'no reading yet'}
-            </Text>
+            <View style={styles.legendRow}>
+              <Ionicons name="locate" size={14} color={c.primary} />
+              <Text style={[typography.body, { color: c.text, fontWeight: '700', flex: 1 }]}>
+                {' '}{selected.label} — {sensors[selected.id]?.value ?? 'no reading yet'}
+              </Text>
+            </View>
             <Text style={[typography.caption, { color: c.textMuted }]} onPress={() => setSelected(null)}>
               Tap to dismiss
             </Text>
@@ -121,16 +135,16 @@ export const ZoneMapScreen = () => {
         ) : (
           <>
             <View style={styles.legendRow}>
-              <View style={[styles.legendDot, { backgroundColor: palette.accent }]} />
-              <Text style={[typography.caption, { color: c.text }]}>Rover position (zone-based)</Text>
+              <Ionicons name="navigate" size={13} color={palette.accent} />
+              <Text style={[typography.caption, { color: c.text }]}> Rover position (zone-based)</Text>
             </View>
             <View style={styles.legendRow}>
-              <View style={[styles.legendDot, { backgroundColor: palette.threatLow }]} />
-              <Text style={[typography.caption, { color: c.text }]}>Sensor node online / door closed</Text>
+              <Ionicons name="checkmark-circle" size={13} color={palette.threatLow} />
+              <Text style={[typography.caption, { color: c.text }]}> Sensor online / door closed</Text>
             </View>
             <View style={styles.legendRow}>
-              <View style={[styles.legendDot, { backgroundColor: palette.threatCritical }]} />
-              <Text style={[typography.caption, { color: c.text }]}>Alert state / door open · motion zone highlight</Text>
+              <Ionicons name="alert" size={13} color={palette.threatCritical} />
+              <Text style={[typography.caption, { color: c.text }]}> Alert state / door open · motion highlight</Text>
             </View>
           </>
         )}
@@ -145,7 +159,8 @@ export const ZoneMapScreen = () => {
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  header: { padding: spacing.lg, paddingBottom: spacing.sm },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', padding: spacing.lg, paddingBottom: spacing.sm },
+  mapChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999 },
   mapCard: { margin: spacing.lg, borderWidth: 1, borderRadius: 14, overflow: 'hidden' },
   legend: { margin: spacing.lg, marginTop: 0, borderWidth: 1, borderRadius: 12, padding: spacing.md, gap: 6 },
   legendRow: { flexDirection: 'row', alignItems: 'center', gap: 8 },
