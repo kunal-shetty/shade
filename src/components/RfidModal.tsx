@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { ActivityIndicator, Modal, StyleSheet, Text, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { palette, spacing, typography, useTheme } from '../theme/theme';
 import { useAdmin, useSettings } from '../store/settings';
 import { setRfidHandler } from '../services/mqtt';
@@ -41,7 +42,8 @@ export const RfidModal = () => {
     return () => clearTimeout(t);
   }, [visible, demoMode, feedback]);
 
-  const icon = feedback === 'granted' ? '✓' : feedback === 'denied' ? '✕' : '📶';
+  const iconName: keyof typeof Ionicons.glyphMap =
+    feedback === 'granted' ? 'checkmark' : feedback === 'denied' ? 'close' : 'scan';
   const color = feedback === 'granted' ? palette.threatLow : feedback === 'denied' ? palette.threatCritical : c.primary;
   const title =
     feedback === 'granted' ? 'Admin session unlocked' : feedback === 'denied' ? 'Unauthorized card' : 'Please scan RFID card at rover';
@@ -56,9 +58,13 @@ export const RfidModal = () => {
     <Modal transparent visible={visible} animationType="fade" onRequestClose={() => showRfidWait(false)}>
       <View style={[styles.backdrop, { backgroundColor: 'rgba(2,6,23,0.7)' }]}>
         <View style={[styles.sheet, { backgroundColor: c.card, borderColor: c.border }]}>
-          {feedback === 'none' ? <ActivityIndicator size="large" color={color} /> : (
-            <View style={[styles.iconCircle, { backgroundColor: color + '22', borderColor: color }]}>
-              <Text style={[styles.iconText, { color }]}>{icon}</Text>
+          {feedback === 'none' ? (
+            <View style={[styles.iconCircle, { backgroundColor: color + '14', borderColor: color + '55' }]}>
+              <Ionicons name="scan" size={30} color={color} />
+            </View>
+          ) : (
+            <View style={[styles.iconCircle, { backgroundColor: color + '18', borderColor: color }]}>
+              <Ionicons name={iconName} size={30} color={color} />
             </View>
           )}
           <Text style={[typography.h2, { color: c.text, textAlign: 'center' }]}>{title}</Text>
@@ -79,7 +85,6 @@ export const RfidModal = () => {
 
 const styles = StyleSheet.create({
   backdrop: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: spacing.xl },
-  sheet: { width: '100%', maxWidth: 340, borderRadius: 16, borderWidth: 1, padding: spacing.xl, alignItems: 'center', gap: spacing.md },
-  iconCircle: { width: 72, height: 72, borderRadius: 36, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
-  iconText: { fontSize: 30, fontWeight: '800' },
+  sheet: { width: '100%', maxWidth: 340, borderRadius: 20, borderWidth: 1, padding: spacing.xl, alignItems: 'center', gap: spacing.md },
+  iconCircle: { width: 76, height: 76, borderRadius: 38, borderWidth: 2, alignItems: 'center', justifyContent: 'center' },
 });
