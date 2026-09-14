@@ -1,9 +1,9 @@
 import React from 'react';
 import { Text } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
 import { NavigationContainer } from '@react-navigation/native';
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs';
 import { createNativeStackNavigator } from '@react-navigation/native-stack';
-import { DarkTheme, DefaultTheme } from '@react-navigation/native';
 import { useColorScheme } from 'react-native';
 import { navDark, navLight, palette, useTheme, getThemeColors, ThemeContext } from '../theme/theme';
 import { useLiveData } from '../store/rover';
@@ -20,25 +20,26 @@ import { SettingsScreen } from '../screens/SettingsScreen';
 const Tab = createBottomTabNavigator();
 const Stack = createNativeStackNavigator();
 
-const icon = (glyph: string) =>
-  function TabIcon({ color, size }: { color: string; size: number }) {
-    return <Text style={{ fontSize: size, color, lineHeight: size + 2 }}>{glyph}</Text>;
+type IconName = keyof typeof Ionicons.glyphMap;
+
+const tabIcon = (name: IconName, activeName: IconName) =>
+  function TabIcon({ color, focused }: { color: string; focused: boolean; size: number }) {
+    return <Ionicons name={focused ? activeName : name} size={21} color={color} />;
   };
 
-const HomeIcon = icon('⌂');
-const ControlIcon = icon('🕹');
-const CameraIcon = icon('📷');
-const IncidentsIcon = icon('🔔');
-const SettingsIcon = icon('⚙');
+const HomeIcon = tabIcon('home-outline', 'home');
+const ControlIcon = tabIcon('game-controller-outline', 'game-controller');
+const CameraIcon = tabIcon('videocam-outline', 'videocam');
+const IncidentsIcon = tabIcon('notifications-outline', 'notifications');
+const SettingsIcon = tabIcon('settings-outline', 'settings');
 
 const TabNavigator = () => {
   const c = useTheme();
-  const unread = useLiveData((s) => s.lastIncidentId);
   const incidents = useLiveData((s) => s.incidents);
+  const lastIncidentId = useLiveData((s) => s.lastIncidentId);
 
-  // unread = open incidents newer than last time user visited Incidents tab
   const openCount = incidents.filter((i) => i.status === 'open').length;
-  const showBadge = unread != null && openCount > 0;
+  const showBadge = lastIncidentId != null && openCount > 0;
 
   return (
     <Tab.Navigator
@@ -46,8 +47,8 @@ const TabNavigator = () => {
         headerShown: false,
         tabBarActiveTintColor: c.primary,
         tabBarInactiveTintColor: c.textMuted,
-        tabBarStyle: { backgroundColor: c.tabBar, borderTopColor: c.border },
-        tabBarLabelStyle: { fontSize: 11, fontWeight: '700' },
+        tabBarStyle: { backgroundColor: c.tabBar, borderTopColor: c.border, height: 62, paddingBottom: 8, paddingTop: 6 },
+        tabBarLabelStyle: { fontSize: 10, fontWeight: '700', letterSpacing: 0.2 },
       }}
     >
       <Tab.Screen name="Dashboard" component={DashboardScreen} options={{ tabBarIcon: HomeIcon, title: 'Home' }} />
@@ -59,7 +60,7 @@ const TabNavigator = () => {
         options={{
           tabBarIcon: IncidentsIcon,
           tabBarBadge: showBadge ? openCount : undefined,
-          tabBarBadgeStyle: { backgroundColor: palette.threatCritical, color: 'white' },
+          tabBarBadgeStyle: { backgroundColor: palette.threatCritical, color: 'white', fontSize: 10, fontWeight: '800' },
         }}
       />
       <Tab.Screen name="Settings" component={SettingsScreen} options={{ tabBarIcon: SettingsIcon }} />
@@ -76,11 +77,17 @@ export const RootNavigator = () => {
   return (
     <ThemeContext.Provider value={colors}>
       <NavigationContainer theme={dark ? navDark : navLight}>
-        <Stack.Navigator>
+        <Stack.Navigator
+          screenOptions={{
+            headerBackTitle: 'Back',
+            headerTintColor: colors.primary,
+            headerTitleStyle: { fontWeight: '700', fontSize: 17 },
+          }}
+        >
           <Stack.Screen name="Main" component={TabNavigator} options={{ headerShown: false }} />
-          <Stack.Screen name="ThreatCenter" component={ThreatCenterScreen} options={{ headerBackTitle: 'Back' }} />
-          <Stack.Screen name="ZoneMap" component={ZoneMapScreen} options={{ headerBackTitle: 'Back' }} />
-          <Stack.Screen name="IncidentDetail" component={IncidentDetailScreen} options={{ headerBackTitle: 'Back' }} />
+          <Stack.Screen name="ThreatCenter" component={ThreatCenterScreen} options={{ title: 'Threat Center' }} />
+          <Stack.Screen name="ZoneMap" component={ZoneMapScreen} options={{ title: 'Zone Map' }} />
+          <Stack.Screen name="IncidentDetail" component={IncidentDetailScreen} options={{ title: 'Incident Detail' }} />
         </Stack.Navigator>
       </NavigationContainer>
     </ThemeContext.Provider>
