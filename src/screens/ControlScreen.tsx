@@ -1,36 +1,59 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { ScrollView, StyleSheet, Text, View } from 'react-native';
+import { PanResponder, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import Svg, { Circle, Line } from 'react-native-svg';
+import { Ionicons } from '@expo/vector-icons';
 import { palette, spacing, typography, useTheme } from '../theme/theme';
 import { useLiveData } from '../store/rover';
 import { useIsAdmin, useAdmin } from '../store/settings';
 import { AdminLock } from '../components/AdminLock';
 import { JoystickPad } from '../components/JoystickPad';
 import { ArcGauge } from '../components/Gauges';
-import { Card, PrimaryButton } from '../components/ui';
+import { Card, PrimaryButton, SectionHeader } from '../components/ui';
 import { createJoystickSender, sendRoverCommand } from '../services/roverLink';
 
 const SpeedSlider = ({ value, onChange, disabled }: { value: number; onChange: (v: number) => void; disabled: boolean }) => {
   const c = useTheme();
+  const trackW = useRef(0);
+  const drag = useRef(
+    PanResponder.create({
+      onStartShouldSetPanResponder: () => !disabled,
+      onMoveShouldSetPanResponder: () => !disabled,
+      onPanResponderGrant: (e) => {
+        const pct = Math.round((e.nativeEvent.locationX / Math.max(1, trackW.current)) * 100);
+        onChange(Math.max(10, Math.min(100, pct)));
+      },
+      onPanResponderMove: (e) => {
+        const pct = Math.round((e.nativeEvent.locationX / Math.max(1, trackW.current)) * 100);
+        onChange(Math.max(10, Math.min(100, pct)));
+      },
+    }),
+  ).current;
+
   return (
     <View>
       <View style={styles.sliderRow}>
-        <Text style={[typography.body, { color: c.textMuted }]}>Speed Limit</Text>
-        <Text style={[typography.body, { color: c.text, fontWeight: '700' }]}>{value}%</Text>
+        <View style={styles.sliderLabel}>
+          <Ionicons name="speedometer" size={14} color={c.primary} />
+          <Text style={[typography.body, { color: c.textMuted }]}> Speed Limit</Text>
+        </View>
+        <Text style={[typography.bodyLg, { color: c.primary, fontWeight: '800' }]}>{value}%</Text>
       </View>
-      <View style={styles.sliderTrack}>
-        <View style={[styles.sliderFill, { width: `${value}%`, backgroundColor: disabled ? c.border : c.primary }]} />
-        <View style={[styles.sliderThumb, { left: `${Math.max(0, Math.min(96, value - 4))}%`, backgroundColor: disabled ? c.border : c.primary }]} />
-        {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((i) => (
-          <View
-            key={i}
-            style={[styles.sliderTickHit, { left: `${i * 10}%` }]}
-            onTouchEnd={disabled ? undefined : () => onChange(Math.max(10, (i + 1) * 10))}
-          />
-        ))}
+      <View
+        style={styles.sliderTrackWrap}
+        onLayout={(e) => (trackW.current = e.nativeEvent.layout.width)}
+        {...drag.panHandlers}
+      >
+        <View style={[styles.sliderTrack, { backgroundColor: c.surface }]}>
+          <View style={[styles.sliderFill, { width: `${value}%` }]} />
+          <View style={[styles.sliderThumb, { left: `${Math.max(0, Math.min(92, value - 4))}%` }]} />
+        </View>
       </View>
-      <Text style={[typography.caption, { color: c.textMuted }]}>10–100% · sent with every MOVE command (FR-R4)</Text>
+      <View style={styles.sliderHintRow}>
+        <Text style={[typography.caption, { color: c.textMuted }]}>10%</Text>
+        <Text style={[typography.caption, { color: c.textMuted }]}>sent with every MOVE · FR-R4</Text>
+        <Text style={[typography.caption, { color: c.textMuted }]}>100%</Text>
+      </View>
     </View>
   );
 };
@@ -38,22 +61,21 @@ const SpeedSlider = ({ value, onChange, disabled }: { value: number; onChange: (
 const Compass = ({ heading }: { heading: number }) => {
   const c = useTheme();
   const needle = (heading - 90) * (Math.PI / 180);
-  const cx = 60;
-  const cy = 60;
+  const cx = 56;
+  const cy = 56;
   return (
     <View style={{ alignItems: 'center' }}>
-      <Svg width={120} height={120}>
-        <Circle cx={cx} cy={cy} r={52} fill="none" stroke={c.border} strokeWidth={2} />
+      <Svg width={112} height={112}>
+        <Circle cx={cx} cy={cy} r={50} fill="none" stroke={c.border} strokeWidth={2} />
+        <Circle cx={cx} cy={cy} r={38} fill="none" stroke={c.border} strokeWidth={1} strokeDasharray="3 4" />
         {['N', 'E', 'S', 'W'].map((d, i) => {
           const a = (i * 90 - 90) * (Math.PI / 180);
-          return (
-            <Circle key={d} cx={cx + 44 * Math.cos(a)} cy={cy + 44 * Math.sin(a)} r={2} fill={c.textMuted} />
-          );
+          return <Circle key={d} cx={cx + 44 * Math.cos(a)} cy={cy + 44 * Math.sin(a)} r={2.5} fill={c.textMuted} />;
         })}
         <Line x1={cx} y1={cy} x2={cx + 40 * Math.cos(needle)} y2={cy + 40 * Math.sin(needle)} stroke={palette.accent} strokeWidth={4} strokeLinecap="round" />
         <Circle cx={cx} cy={cy} r={5} fill={c.text} />
       </Svg>
-      <Text style={[typography.caption, { color: c.textMuted }]}>{Math.round(heading)}° heading</Text>
+      <Text style={[typography.caption, { color: c.textMuted, marginTop: 4 }]}>{Math.round(heading)}° heading</Text>
     </View>
   );
 };
@@ -71,7 +93,6 @@ export const ControlScreen = () => {
   const [patrolActive, setPatrolActive] = useState(false);
   const sender = useRef(createJoystickSender()).current;
 
-  // keep speed limit in every movement command (FR-R4)
   useEffect(() => {
     sendRoverCommand({ cmd: 'SET_SPEED', value: speedLimit });
   }, [speedLimit]);
@@ -83,56 +104,67 @@ export const ControlScreen = () => {
   };
 
   const connected = wsState === 'connected' || wsState === 'demo';
+  const lock = (fn: () => void) => () => (isAdmin ? fn() : showRfidModal(true));
 
   return (
     <SafeAreaView style={styles.safe} edges={['left', 'right']}>
-      <ScrollView contentContainerStyle={styles.container}>
-        <View style={styles.statusRow}>
-          <Text style={[typography.h2, { color: c.text }]}>Manual Control</Text>
-          <Text style={[typography.caption, { color: connected ? palette.threatLow : palette.threatMedium }]}>
-            {connected ? 'Link ready' : 'Link down'} · {wsLatency != null ? wsLatency + ' ms RTT' : 'measuring…'}
-          </Text>
+      <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
+        <View style={styles.headerRow}>
+          <View>
+            <Text style={[typography.caption, { color: c.textMuted, letterSpacing: 1.2 }]}>MANUAL OVERRIDE</Text>
+            <Text style={[typography.h1, { color: c.text, fontSize: 26 }]}>Rover Control</Text>
+          </View>
+          <View style={[styles.linkChip, { backgroundColor: connected ? `${palette.threatLow}16` : `${palette.threatMedium}16` }]}>
+            <Ionicons name={connected ? 'wifi' : 'wifi-outline'} size={12} color={connected ? palette.threatLow : palette.threatMedium} />
+            <Text style={{ color: connected ? palette.threatLow : palette.threatMedium, fontSize: 11, fontWeight: '800' }}>
+              {connected ? (wsLatency != null ? `${wsLatency} ms` : 'READY') : 'DOWN'}
+            </Text>
+          </View>
         </View>
 
-        {/* Joystick — full control requires admin (FR-R1/R3); STOP always allowed */}
+        {/* Joystick */}
         <AdminLock onRequestUnlock={() => showRfidModal(true)} lockedHint="Scan RFID at rover to unlock driving">
-          <JoystickPad
-            disabled={!isAdmin || !connected}
-            onMove={(angle, speed) => sender.move(angle, speed, speedLimit)}
-            onStop={() => sender.stop()}
-          />
+          <View style={[styles.joyCard, { backgroundColor: c.card, borderColor: c.border }]}>
+            <JoystickPad
+              disabled={!isAdmin || !connected}
+              onMove={(angle, speed) => sender.move(angle, speed, speedLimit)}
+              onStop={() => sender.stop()}
+            />
+            <Text style={[typography.caption, { color: c.textMuted, marginTop: spacing.md, textAlign: 'center' }]}>
+              Drag to drive · release to stop · FR-R1
+            </Text>
+          </View>
         </AdminLock>
 
         <Card>
           <SpeedSlider value={speedLimit} onChange={setSpeedLimit} disabled={!isAdmin} />
         </Card>
 
-        <Card>
-          <View style={styles.controlRow}>
-            <View style={styles.controlBtn}>
-              <PrimaryButton label={patrolActive ? 'Stop Patrol' : 'Start Patrol'} onPress={isAdmin ? togglePatrol : () => showRfidModal(true)} disabled={!connected} sublabel={isAdmin ? undefined : 'RFID required'} />
-            </View>
-            <View style={styles.controlBtn}>
-              <PrimaryButton label="Return Home" onPress={() => { if (isAdmin) sendRoverCommand({ cmd: 'RETURN_HOME' }); else showRfidModal(true); }} sublabel={isAdmin ? undefined : 'RFID required'} />
-            </View>
+        <SectionHeader icon="extension-puzzle" title="Drive Commands" />
+        <View style={styles.btnGrid}>
+          <View style={styles.cell}>
+            <PrimaryButton icon={patrolActive ? 'stop' : 'play'} label={patrolActive ? 'Stop Patrol' : 'Start Patrol'} onPress={lock(togglePatrol)} disabled={!connected} sublabel={isAdmin ? undefined : 'RFID required'} />
           </View>
-          <View style={styles.controlRow}>
-            <View style={styles.controlBtn}>
-              <PrimaryButton label="🔊 Horn" onPress={() => { if (isAdmin) sendRoverCommand({ cmd: 'BUZZER', duration: 1000 }); else showRfidModal(true); }} sublabel={isAdmin ? undefined : 'RFID required'} />
-            </View>
-            <View style={styles.controlBtn}>
-              <PrimaryButton label="🛑 EMERGENCY STOP" danger onPress={() => sendRoverCommand({ cmd: 'STOP' })} sublabel="Always available" />
-            </View>
+          <View style={styles.cell}>
+            <PrimaryButton icon="home" label="Return Home" onPress={lock(() => { sendRoverCommand({ cmd: 'RETURN_HOME' }); })} sublabel={isAdmin ? undefined : 'RFID required'} />
           </View>
-          {patrolActive ? (
-            <View style={[styles.patrolPill, { backgroundColor: palette.threatLow + '22' }]}>
-              <Text style={{ color: palette.threatLow, fontWeight: '800', fontSize: 12 }}>● PATROL ACTIVE (FR-R5)</Text>
-            </View>
-          ) : null}
-        </Card>
+          <View style={styles.cell}>
+            <PrimaryButton icon="megaphone" label="Horn" onPress={lock(() => { sendRoverCommand({ cmd: 'BUZZER', duration: 1000 }); })} sublabel={isAdmin ? undefined : 'RFID required'} />
+          </View>
+          <View style={styles.cell}>
+            <PrimaryButton icon="hand-left" label="E-Stop" danger onPress={() => sendRoverCommand({ cmd: 'STOP' })} sublabel="Always available" />
+          </View>
+        </View>
 
-        {/* Telemetry mini-panel (PRD §6.2.3) */}
-        <Text style={[typography.h2, { color: c.text }]}>Telemetry</Text>
+        {patrolActive ? (
+          <View style={[styles.patrolPill, { backgroundColor: `${palette.threatLow}16` }]}>
+            <View style={[styles.patrolDot, { backgroundColor: palette.threatLow }]} />
+            <Text style={{ color: palette.threatLow, fontWeight: '800', fontSize: 12 }}>PATROL ACTIVE · FR-R5</Text>
+          </View>
+        ) : null}
+
+        {/* Telemetry */}
+        <SectionHeader icon="speedometer" title="Telemetry" />
         <Card>
           <View style={styles.telemetryRow}>
             <ArcGauge valueCm={telemetry?.ultrasonic_cm ?? 0} />
@@ -140,16 +172,19 @@ export const ControlScreen = () => {
           </View>
           <View style={styles.motorRow}>
             <View style={[styles.motorBox, { backgroundColor: c.surface }]}>
+              <Ionicons name="swap-horizontal" size={13} color={c.textMuted} />
               <Text style={[typography.caption, { color: c.textMuted }]}>MOTOR L</Text>
               <Text style={[typography.h2, { color: c.text }]}>{Math.round(telemetry?.speed_l ?? 0)}%</Text>
             </View>
             <View style={[styles.motorBox, { backgroundColor: c.surface }]}>
+              <Ionicons name="swap-horizontal" size={13} color={c.textMuted} />
               <Text style={[typography.caption, { color: c.textMuted }]}>MOTOR R</Text>
               <Text style={[typography.h2, { color: c.text }]}>{Math.round(telemetry?.speed_r ?? 0)}%</Text>
             </View>
             <View style={[styles.motorBox, { backgroundColor: c.surface }]}>
+              <Ionicons name="navigate" size={13} color={c.textMuted} />
               <Text style={[typography.caption, { color: c.textMuted }]}>STATE</Text>
-              <Text style={[typography.body, { color: c.text, fontWeight: '700' }]}>
+              <Text style={[typography.body, { color: c.text, fontWeight: '800' }]}>
                 {(roverStatus?.state ?? 'offline').toUpperCase()}
               </Text>
             </View>
@@ -162,17 +197,22 @@ export const ControlScreen = () => {
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  container: { padding: spacing.lg, gap: spacing.lg, paddingBottom: 40 },
-  statusRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
-  sliderRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 8 },
-  sliderTrack: { height: 44, borderRadius: 10, backgroundColor: 'rgba(148,163,184,0.25)', overflow: 'hidden', justifyContent: 'center' },
-  sliderFill: { height: '100%', borderRadius: 10 },
-  sliderThumb: { position: 'absolute', top: 8, width: 10, height: 28, borderRadius: 5 },
-  sliderTickHit: { position: 'absolute', top: 0, bottom: 0, width: '12%' },
-  controlRow: { flexDirection: 'row', gap: spacing.sm },
-  controlBtn: { flex: 1 },
-  patrolPill: { alignSelf: 'flex-start', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 999, marginTop: 8 },
-  telemetryRow: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', flexWrap: 'wrap', gap: spacing.sm },
-  motorRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.md },
-  motorBox: { flex: 1, borderRadius: 10, padding: spacing.sm, alignItems: 'center', gap: 2 },
+  container: { padding: spacing.lg, gap: spacing.lg, paddingBottom: 48 },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  linkChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999 },
+  joyCard: { borderWidth: 1, borderRadius: 18, padding: spacing.xl, alignItems: 'center' },
+  sliderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
+  sliderLabel: { flexDirection: 'row', alignItems: 'center' },
+  sliderTrackWrap: { paddingVertical: 10 },
+  sliderTrack: { height: 14, borderRadius: 7, overflow: 'hidden', justifyContent: 'center' },
+  sliderFill: { position: 'absolute', left: 0, top: 0, bottom: 0, borderRadius: 7, backgroundColor: palette.primary },
+  sliderThumb: { position: 'absolute', top: -4, width: 22, height: 22, borderRadius: 11, backgroundColor: 'white', borderWidth: 4, borderColor: palette.primary, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 4, shadowOffset: { width: 0, height: 2 }, elevation: 4 },
+  sliderHintRow: { flexDirection: 'row', justifyContent: 'space-between', marginTop: 2 },
+  btnGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: spacing.sm },
+  cell: { flexGrow: 1, minWidth: 160 },
+  patrolPill: { flexDirection: 'row', alignItems: 'center', gap: 7, alignSelf: 'center', paddingHorizontal: 14, paddingVertical: 7, borderRadius: 999 },
+  patrolDot: { width: 7, height: 7, borderRadius: 4 },
+  telemetryRow: { flexDirection: 'row', justifyContent: 'space-around', alignItems: 'center', flexWrap: 'wrap', gap: spacing.md },
+  motorRow: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.lg },
+  motorBox: { flex: 1, borderRadius: 12, padding: spacing.md, alignItems: 'center', gap: 3 },
 });
