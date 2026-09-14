@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
+import { Ionicons } from '@expo/vector-icons';
 import { palette, spacing, typography, useTheme } from '../theme/theme';
 import { useAdmin, useSettings } from '../store/settings';
 import { Card } from '../components/ui';
@@ -92,47 +93,60 @@ export const SettingsScreen = () => {
 
   return (
     <SafeAreaView style={styles.safe} edges={['left', 'right']}>
-      <ScrollView contentContainerStyle={styles.container}>
-        <Text style={[typography.h1, { color: c.text }]}>Settings</Text>
+      <ScrollView contentContainerStyle={styles.container} showsVerticalScrollIndicator={false}>
+        <View style={styles.headerRow}>
+          <View>
+            <Text style={[typography.caption, { color: c.textMuted, letterSpacing: 1.2 }]}>CONFIGURATION</Text>
+            <Text style={[typography.h1, { color: c.text, fontSize: 26 }]}>Settings</Text>
+          </View>
+          <Ionicons name="settings" size={22} color={c.primary} />
+        </View>
 
         {/* Admin section */}
         <Card>
-          <Text style={[typography.caption, { color: c.textMuted }]}>ADMIN SESSION</Text>
+          <View style={styles.cardTitleRow}>
+            <Ionicons name="shield-checkmark" size={14} color={c.primary} />
+            <Text style={[typography.caption, { color: c.textMuted, marginLeft: 6, letterSpacing: 0.8 }]}>ADMIN SESSION</Text>
+          </View>
           {session ? (
             <>
-              <Text style={[typography.bodyLg, { color: palette.threatLow, fontWeight: '700' }]}>
-                Unlocked · card {session.uid}
-              </Text>
+              <View style={styles.sessionRow}>
+                <Ionicons name="lock-open" size={16} color={palette.threatLow} />
+                <Text style={[typography.bodyLg, { color: palette.threatLow, fontWeight: '700' }]}> Unlocked · card {session.uid}</Text>
+              </View>
               <Text style={[typography.caption, { color: c.textMuted }]}>
                 Expires {new Date(session.expiresAt).toLocaleTimeString()}
               </Text>
-              <Text
-                onPress={logout}
-                style={{ color: 'white', backgroundColor: palette.threatCritical, textAlign: 'center', paddingVertical: 12, borderRadius: 10, fontWeight: '800', marginTop: spacing.md }}
+              <View
+                style={[styles.wideBtn, { backgroundColor: palette.threatCritical }]}
+                onTouchEnd={logout}
                 accessibilityRole="button"
                 accessibilityLabel="Admin logout"
               >
-                Admin Logout
-              </Text>
+                <Ionicons name="log-out" size={15} color="white" />
+                <Text style={styles.wideBtnText}> Admin Logout</Text>
+              </View>
             </>
           ) : (
             <>
-              <Text style={[typography.body, { color: c.text }]}>Locked — scan RFID card at rover to unlock admin features.</Text>
-              <Text
-                onPress={handleAdminLogin}
-                style={{ color: 'white', backgroundColor: c.primary, textAlign: 'center', paddingVertical: 12, borderRadius: 10, fontWeight: '800', marginTop: spacing.md }}
-                accessibilityRole="button"
-                accessibilityLabel="Admin login"
-              >
-                Admin Login (scan RFID at rover)
-              </Text>
+              <View style={styles.sessionRow}>
+                <Ionicons name="lock-closed" size={16} color={c.textMuted} />
+                <Text style={[typography.body, { color: c.text, flex: 1 }]}> Locked — scan RFID card at the rover to unlock admin features.</Text>
+              </View>
+              <View style={styles.wideBtn} onTouchEnd={handleAdminLogin} accessibilityRole="button" accessibilityLabel="Admin login">
+                <Ionicons name="scan" size={15} color="white" />
+                <Text style={styles.wideBtnText}> Admin Login (scan RFID)</Text>
+              </View>
             </>
           )}
         </Card>
 
         {/* Connection section */}
         <Card>
-          <Text style={[typography.caption, { color: c.textMuted }]}>RASPBERRY PI CONNECTION</Text>
+          <View style={styles.cardTitleRow}>
+            <Ionicons name="hardware-chip" size={14} color={c.primary} />
+            <Text style={[typography.caption, { color: c.textMuted, marginLeft: 6, letterSpacing: 0.8 }]}>RASPBERRY PI CONNECTION</Text>
+          </View>
           <View style={styles.hostRow}>
             <Text style={[typography.body, { color: c.text }]}>Pi IP Address</Text>
             <TextInput
@@ -168,19 +182,25 @@ export const SettingsScreen = () => {
               }}
             />
           </Row>
-          <Text
-            onPress={applyAndReconnect}
-            style={{ color: 'white', backgroundColor: palette.primary, textAlign: 'center', paddingVertical: 12, borderRadius: 10, fontWeight: '800', marginTop: spacing.md }}
+          <View
+            style={styles.wideBtn}
+            onTouchEnd={applyAndReconnect}
             accessibilityRole="button"
             accessibilityLabel="Save and reconnect"
           >
-            Save & Reconnect
-        </Text>
+            <Ionicons name="save" size={15} color="white" />
+            <Text style={styles.wideBtnText}> Save & Reconnect</Text>
+          </View>
         </Card>
 
         {/* Notifications */}
         <Card>
-          <Text style={[typography.caption, { color: c.textMuted }]}>NOTIFICATIONS {pushStatus ? '· ' + pushStatus : ''}</Text>
+          <View style={styles.cardTitleRow}>
+            <Ionicons name="notifications" size={14} color={c.primary} />
+            <Text style={[typography.caption, { color: c.textMuted, marginLeft: 6, letterSpacing: 0.8 }]}>
+              NOTIFICATIONS{pushStatus ? ' · ' + pushStatus : ''}
+            </Text>
+          </View>
           <Row label="Push Notifications">
             <Switch value={prefs.pushEnabled} onValueChange={(v) => setPrefs({ pushEnabled: v })} />
           </Row>
@@ -191,7 +211,10 @@ export const SettingsScreen = () => {
 
         {/* Appearance & stream */}
         <Card>
-          <Text style={[typography.caption, { color: c.textMuted }]}>APPEARANCE & STREAM</Text>
+          <View style={styles.cardTitleRow}>
+            <Ionicons name="contrast" size={14} color={c.primary} />
+            <Text style={[typography.caption, { color: c.textMuted, marginLeft: 6, letterSpacing: 0.8 }]}>APPEARANCE & STREAM</Text>
+          </View>
           <Row label="Dark Mode">
             <Picker options={['system', 'light', 'dark']} value={prefs.darkMode} onChange={(v) => setPrefs({ darkMode: v as any })} />
           </Row>
@@ -213,7 +236,12 @@ export const SettingsScreen = () => {
 
 const styles = StyleSheet.create({
   safe: { flex: 1 },
-  container: { padding: spacing.lg, gap: spacing.lg, paddingBottom: 40 },
+  container: { padding: spacing.lg, gap: spacing.lg, paddingBottom: 48 },
+  headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  cardTitleRow: { flexDirection: 'row', alignItems: 'center', marginBottom: spacing.sm },
+  sessionRow: { flexDirection: 'row', alignItems: 'center' },
+  wideBtn: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', backgroundColor: palette.primary, borderRadius: 12, paddingVertical: 13, marginTop: spacing.md },
+  wideBtnText: { color: 'white', fontWeight: '800', fontSize: 14 },
   row: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 6 },
   hostRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingVertical: 6 },
   input: { borderWidth: 1, borderRadius: 8, paddingHorizontal: 10, paddingVertical: 6, minWidth: 90, textAlign: 'center' },
