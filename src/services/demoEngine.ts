@@ -89,7 +89,7 @@ export const startDemoEngine = () => {
   // --- device health ---
   startTimer(() => {
     handleMqttMessage('device/health', JSON.stringify({
-      esp32_door: 'online', pir_node: 'online', gas_node: 'online', rover: 'online', camera: 'online',
+      arduino_door: 'online', pir_node: 'online', gas_node: 'online', rover: 'online', camera: 'online',
       pi: { cpu: Math.round(30 + Math.random() * 20), ram: 46, temp: 52, uptime: 86400 * 3 },
     }));
   }, 5000);
