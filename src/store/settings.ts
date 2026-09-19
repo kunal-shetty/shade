@@ -35,13 +35,13 @@ export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
       connection: {
-        host: '192.168.4.1',
+        host: '192.168.0.115',
         wsPort: 8765,
-        mqttPort: 9001,
+        mqttPort: 1883,
         apiPort: 8000,
-      streamPort: 8080,
+      streamPort: 5000,
       autoReconnect: true,
-      demoMode: true,
+      demoMode: false,
     },
       prefs: {
         pushEnabled: true,
@@ -73,7 +73,7 @@ interface AdminState {
 }
 
 export const useAdmin = create<AdminState>()((set) => ({
-  session: null,
+  session: { uid: 'DEFAULT_ADMIN', startedAt: Date.now(), expiresAt: Date.now() + 1000 * 60 * 60 * 24 * 365 },
   rfidWaitVisible: false,
   unlock: (uid, timeoutMin) =>
     set({ session: { uid, startedAt: Date.now(), expiresAt: Date.now() + timeoutMin * 60_000 } }),
