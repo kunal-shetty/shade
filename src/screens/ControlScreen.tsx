@@ -126,7 +126,7 @@ export const ControlScreen = () => {
         <AdminLock onRequestUnlock={() => showRfidModal(true)} lockedHint="Scan RFID at rover to unlock driving">
           <View style={[styles.joyCard, { backgroundColor: c.card, borderColor: c.border }]}>
             <JoystickPad
-              disabled={!isAdmin || !connected}
+              disabled={false}
               onMove={(angle, speed) => sender.move(angle, speed, speedLimit)}
               onStop={() => sender.stop()}
             />
