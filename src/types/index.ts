@@ -120,7 +120,7 @@ export interface MqttThreat {
 }
 
 export interface MqttDeviceHealth {
-  esp32_door: 'online' | 'offline';
+  arduino_door: 'online' | 'offline';
   pir_node: 'online' | 'offline';
   gas_node: 'online' | 'offline';
   rover: 'online' | 'offline';
