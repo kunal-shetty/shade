@@ -114,7 +114,7 @@ export const useLiveData = create<LiveDataState>((set) => ({
             h.pi ? `CPU ${h.pi.cpu}% · RAM ${h.pi.ram}% · ${h.pi.temp}°C` : 'Health packet received',
             true,
           ),
-          esp32_door: mk('esp32_door', 'ESP32 Door Node', 'Door/reed + RFID reader', h.esp32_door === 'online'),
+          arduino_door: mk('arduino_door', 'Arduino Door Node', 'Door/reed + RFID reader', h.arduino_door === 'online'),
           pir_node: mk('pir_node', 'PIR Node', 'Motion detector', h.pir_node === 'online'),
           gas_node: mk('gas_node', 'Gas Sensor Node', 'MQ-2 smoke/gas', h.gas_node === 'online'),
           rover: mk('rover', 'Rover', 'Drive + ultrasonic', h.rover === 'online'),
