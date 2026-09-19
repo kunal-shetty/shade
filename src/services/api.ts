@@ -16,7 +16,7 @@ export const getStreamUri = (): string => {
     // Inline MJPEG-over-HTML demo stream rendered in a WebView (no hardware needed)
     return demoStreamHtmlUri();
   }
-  return `http://${host}:${streamPort}/stream.mjpg`;
+  return `http://${host}:${streamPort}`;
 };
 
 const DEMO_HTML = `<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width,initial-scale=1"/>
