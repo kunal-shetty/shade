@@ -13,13 +13,56 @@ git clone <your-repo> cybersentinel && cd cybersentinel
 sudo bash pi/setup.sh
 ```
 
-This installs Mosquitto (with a websockets listener), Avahi (mDNS), espeak-ng,
-ffmpeg, and runs the gateway as `cybersentinel-gateway`.
+`setup.sh` is idempotent — re-run it any time (e.g. after `git pull`) and it will
+redeploy and restart everything. It installs and configures:
 
-Check it:
+| Component | Purpose |
+|-----------|---------|
+| Python venv + gateway deps | the FastAPI gateway |
+| `mosquitto` (+ websockets listener) | MQTT for the app |
+| `avahi-daemon` / `libnss-mdns` | `cybersentinel.local` |
+| `espeak-ng` + `alsa-utils` | the speaker |
+| `ffmpeg` + `v4l-utils` | the camera stream (supervised by the gateway) |
+| `cybersentinel-gateway` systemd unit | runs the gateway |
+
+### Boot behaviour
+
+All three services are `systemctl enable`d, so a power cycle brings everything
+back with no login and no manual start:
+
+| Service | Starts on boot |
+|---------|----------------|
+| `cybersentinel-gateway` | yes — cameras, MQTT client, WebSocket, REST, speaker |
+| `mosquitto` | yes |
+| `avahi-daemon` | yes |
+
+The camera has **no service of its own**: the gateway spawns and supervises the
+`ffmpeg` MJPEG server, and restarts it whenever the stream dies or the camera is
+replugged. One service to enable, one thing to debug.
+
+### Verifying a deploy
+
+`setup.sh` finishes with a self-check. It prints the version of the
+`gateway.py` it deployed and the live state reported by `/health`:
+
+```
+==> Verifying the gateway on port 8000
+    [ok] version : 1.1.0
+    [ok] speaker : espeak-ng
+    [--] camera  : offline - /dev/video0 not present
+    [--] arduino : offline
+```
+
+A stale clone is called out explicitly (`MISSING - the deployed gateway.py is
+stale`), which is the usual reason a fix "didn't work" after re-running setup:
+`git pull` first, then re-run.
+
+Check it by hand:
 
 ```bash
 curl http://cybersentinel.local:8000/health
+curl http://cybersentinel.local:8000/camera/status
+systemctl is-enabled cybersentinel-gateway mosquitto avahi-daemon
 journalctl -u cybersentinel-gateway -f
 ```
 
