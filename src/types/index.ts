@@ -137,4 +137,52 @@ export type RoverCommand =
   | { cmd: 'PATROL_START' }
   | { cmd: 'PATROL_STOP' }
   | { cmd: 'RETURN_HOME' }
-  | { cmd: 'BUZZER'; duration: number };
+  | { cmd: 'BUZZER'; duration: number }
+  | { cmd: 'SPEAK'; text: string }
+  | { cmd: 'TTS_STOP' };
+
+// ---- Voice control (mic -> transcript -> JEV -> rover action) ----
+
+export type VoiceActionId =
+  | 'none'
+  | 'stop'
+  | 'move_forward'
+  | 'move_backward'
+  | 'turn_left'
+  | 'turn_right'
+  | 'patrol_start'
+  | 'patrol_stop'
+  | 'return_home'
+  | 'horn'
+  | 'trigger_alarm'
+  | 'night_mode'
+  | 'start_recording'
+  | 'status_report';
+
+export interface VoiceAction {
+  id: VoiceActionId;
+  label: string;
+  confidence: number;
+  /** True when the action changes safety-critical state and needs high confidence. */
+  destructive: boolean;
+}
+
+export type VoiceStage =
+  | 'idle'
+  | 'listening'
+  | 'thinking'
+  | 'acting'
+  | 'speaking'
+  | 'error';
+
+export interface VoiceTurn {
+  id: number;
+  ts: number;
+  transcript: string;
+  action: VoiceActionId;
+  actionLabel: string;
+  confidence: number;
+  reply: string;
+  executed: boolean;
+  note?: string;
+}
