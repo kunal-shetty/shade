@@ -45,6 +45,16 @@ export interface VoiceContext {
 
 const num = (v: number | null, suffix = '') => (v == null ? 'unknown' : `${Math.round(v)}${suffix}`);
 
+/** Picks one phrasing at random so repeated commands don't sound robotic. */
+const pick = (options: readonly string[]): string =>
+  options[Math.floor(Math.random() * options.length)]!;
+
+/**
+ * The phone's fallback voice. Slightly raised pitch for a friendlier, chirpier
+ * delivery — the Pi's voice is tuned separately (CS_TTS_VOICE / CS_TTS_PITCH).
+ */
+const PHONE_VOICE = { pitch: 1.18, rate: 1.04 } as const;
+
 export const VOICE_ACTIONS: ActionDef[] = [
   {
     id: 'none',
@@ -52,91 +62,105 @@ export const VOICE_ACTIONS: ActionDef[] = [
     highStakes: false,
     criterion:
       'Do nothing. Use when `spoken_command` is not addressed to the rover, is general conversation or a question, is too vague, or asks for something that is not in this list.',
-    reply: () => "I couldn't find a rover command in that, so I haven't changed anything.",
+    reply: () =>
+      pick([
+        "Hmm, I couldn't find a rover command in that, so nothing's changed.",
+        "That didn't sound like a rover command, so I've left everything as it was.",
+        "Not sure that one was for me — I didn't touch a thing.",
+      ]),
   },
   {
     id: 'stop',
     label: 'Stop',
     highStakes: false,
     criterion: 'Stop all movement immediately. Halt, freeze, emergency stop, cut the motors.',
-    reply: () => 'Stopping the rover.',
+    reply: () => pick(['Stopping right away!', 'All stop — holding still.', 'Brakes on!']),
   },
   {
     id: 'move_forward',
     label: 'Move forward',
     highStakes: false,
     criterion: 'Drive forward. Go ahead, advance, move up, proceed.',
-    reply: (ctx) => `Moving forward at ${ctx.speedPct} percent.`,
+    reply: (ctx) =>
+      pick([
+        `Rolling forward at ${ctx.speedPct} percent!`,
+        `Forward we go — ${ctx.speedPct} percent.`,
+        `Scooting ahead at ${ctx.speedPct} percent.`,
+      ]),
   },
   {
     id: 'move_backward',
     label: 'Move backward',
     highStakes: false,
     criterion: 'Drive backward. Reverse, back up, retreat.',
-    reply: (ctx) => `Reversing at ${ctx.speedPct} percent.`,
+    reply: (ctx) =>
+      pick([
+        `Backing up at ${ctx.speedPct} percent.`,
+        `Reversing — nice and slow, ${ctx.speedPct} percent.`,
+      ]),
   },
   {
     id: 'turn_left',
     label: 'Turn left',
     highStakes: false,
     criterion: 'Turn or rotate to the left.',
-    reply: () => 'Turning left.',
+    reply: () => pick(['Turning left!', 'Swinging left.', 'Left it is!']),
   },
   {
     id: 'turn_right',
     label: 'Turn right',
     highStakes: false,
     criterion: 'Turn or rotate to the right.',
-    reply: () => 'Turning right.',
+    reply: () => pick(['Turning right!', 'Swinging right.', 'Right it is!']),
   },
   {
     id: 'patrol_start',
     label: 'Start patrol',
     highStakes: false,
     criterion: 'Begin the autonomous patrol sweep around the zones.',
-    reply: () => 'Starting the patrol sweep.',
+    reply: () => pick(['Patrol started — off I go!', 'Starting the rounds!', 'Patrol under way!']),
   },
   {
     id: 'patrol_stop',
     label: 'Stop patrol',
     highStakes: true,
     criterion: 'End the autonomous patrol and hold position.',
-    reply: () => 'Patrol stopped. Holding position.',
+    reply: () => pick(['Patrol stopped. Holding position.', 'Ending the patrol — standing by.']),
   },
   {
     id: 'return_home',
     label: 'Return home',
     highStakes: false,
     criterion: 'Return to the charging dock / home base.',
-    reply: () => 'Returning to the dock.',
+    reply: () => pick(['Heading home to the dock.', 'Homeward bound!', 'On my way back to the dock.']),
   },
   {
     id: 'horn',
     label: 'Horn',
     highStakes: false,
     criterion: 'Sound the horn or buzzer once. Beep, honk.',
-    reply: () => 'Sounding the horn.',
+    reply: () => pick(['Beep beep!', 'Honk honk!', 'Sounding the horn!']),
   },
   {
     id: 'trigger_alarm',
     label: 'Trigger alarm',
     highStakes: true,
     criterion: 'Raise the intruder alarm or siren, e.g. to scare someone off.',
-    reply: () => 'Intruder alarm triggered.',
+    reply: () => pick(['Alarm raised — heads up!', 'Sounding the intruder alarm!', 'Alarm triggered!']),
   },
   {
     id: 'night_mode',
     label: 'Night mode',
     highStakes: false,
     criterion: 'Switch the camera into night vision / infrared mode.',
-    reply: () => 'Camera night mode on.',
+    reply: () => pick(['Night vision on.', 'Switching to night vision — say cheese!', 'Night mode engaged.']),
   },
   {
     id: 'start_recording',
     label: 'Start recording',
     highStakes: false,
     criterion: 'Start recording camera footage.',
-    reply: () => 'Recording camera footage.',
+    reply: () => pick(['Camera rolling!', 'Recording now.', 'Got it — recording.']),
   },
   {
     id: 'status_report',
@@ -144,8 +168,9 @@ export const VOICE_ACTIONS: ActionDef[] = [
     highStakes: false,
     criterion: 'Report the current status: battery, zone, threat level and rover state.',
     reply: (ctx) =>
-      `Battery ${num(ctx.battery, ' percent')}, currently in ${ctx.zone}, ` +
-      `rover is ${ctx.roverState}, threat level ${ctx.threatLevel}` +
+      pick(['Here you go!', 'Quick status:', 'Right, here is where things stand.']) +
+      ` Battery ${num(ctx.battery, ' percent')}, I'm in ${ctx.zone}, ` +
+      `the rover is ${ctx.roverState}, and the threat level is ${ctx.threatLevel}` +
       (ctx.threatScore == null ? '.' : ` at ${Math.round(ctx.threatScore)} out of 100.`),
   },
 ];
@@ -354,7 +379,11 @@ export async function speakReply(text: string): Promise<void> {
   if (prefs.phoneSpeakerFallback) {
     try {
       Speech.stop();
-      Speech.speak(text, { language: prefs.voiceLanguage, rate: 1.0 });
+      Speech.speak(text, {
+        language: prefs.voiceLanguage,
+        pitch: PHONE_VOICE.pitch,
+        rate: PHONE_VOICE.rate,
+      });
     } catch {
       // ignore: nothing else to fall back to
     }
@@ -404,7 +433,7 @@ export const handleTranscript = async (transcript: string): Promise<void> => {
       { ...pending.action, id: 'none', label: 'No action', destructive: false },
       pending.action.confidence,
       false,
-      'Cancelled. Nothing was changed.',
+      pick(['Okay, cancelled — nothing was changed.', 'No problem, I left it alone.']),
     );
     return;
   }
@@ -420,7 +449,7 @@ export const handleTranscript = async (transcript: string): Promise<void> => {
     const message =
       err instanceof JevError
         ? err.code === 'no-key'
-          ? 'Add your TypeSafe API key in Settings to enable voice control.'
+          ? "Pop into Settings and add your TypeSafe key, and I'll be all ears!"
           : err.message
         : 'Voice classification failed.';
     V.setError(message);
@@ -456,14 +485,20 @@ export const handleTranscript = async (transcript: string): Promise<void> => {
   // 2. Too unsure to act (stopping is always allowed — it is the safe default).
   const threshold = action.id === 'stop' ? Math.min(minConfidence, 0.4) : minConfidence;
   if (action.confidence < threshold) {
-    const reply = `I'm not sure what you meant by "${clean}". Please say it again.`;
+    const reply = pick([
+      `Sorry, I didn't quite catch "${clean}". Could you say that again?`,
+      `Hmm, I'm not sure about "${clean}" — one more time?`,
+    ]);
     await finishTurn(clean, action, action.confidence, false, reply, 'Below confidence threshold');
     return;
   }
 
   // 3. Safety-critical actions need near-certainty; otherwise ask to confirm.
   if (destructive && action.confidence < 0.9) {
-    const reply = `Did you mean to ${action.label.toLowerCase()}? Say "confirm" to proceed.`;
+    const reply = pick([
+      `Just to be sure — did you want me to ${action.label.toLowerCase()}? Say confirm and I'll do it.`,
+      `That one's a big deal, so I'd rather check: shall I ${action.label.toLowerCase()}? Say confirm.`,
+    ]);
     V.setPending({ action, transcript: clean });
     V.setStage('speaking');
     await speakReply(reply);
