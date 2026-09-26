@@ -168,7 +168,9 @@ export const handleMqttMessage = (topic: string, raw: string) => {
       break;
     }
     case 'device/health': {
-      L.setDeviceHealth(m as unknown as MqttDeviceHealth);
+      const health = m as unknown as MqttDeviceHealth;
+      L.setDeviceHealth(health);
+      L.setCameraOnline(health.camera === 'online');
       break;
     }
     default:
