@@ -7,6 +7,7 @@ import { palette, spacing, typography, threatColor, useTheme } from '../theme/th
 import { useLiveData } from '../store/rover';
 import { useAdmin, useIsAdmin, useSettings } from '../store/settings';
 import { Card, PrimaryButton, SectionHeader, SensorCard, timeAgo } from '../components/ui';
+import { VoiceControl } from '../components/VoiceControl';
 import { sendRoverCommand } from '../services/roverLink';
 import { api } from '../services/api';
 import { triggerDemoAlarm } from '../services/demoEngine';
@@ -160,6 +161,9 @@ export const DashboardScreen = ({ navigation }: any) => {
         </View>
 
         <ThreatBanner onPress={() => navigation.navigate('ThreatCenter')} />
+
+        {/* voice control — mic -> JEV -> rover */}
+        <VoiceControl />
 
         {/* last detection */}
         <Card>
