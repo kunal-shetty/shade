@@ -8,9 +8,14 @@ Type=simple
 User=pi
 WorkingDirectory=/opt/cybersentinel
 EnvironmentFile=-/opt/cybersentinel/gateway.env
+# Python block-buffers stdout when it is not a TTY, which hides the "[api] ..."
+# lines from `journalctl -u cybersentinel-gateway` until the buffer fills.
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/opt/cybersentinel/venv/bin/python /opt/cybersentinel/gateway.py
 Restart=always
 RestartSec=3
+# Kill the supervised ffmpeg camera process along with the gateway.
+KillMode=control-group
 
 [Install]
 WantedBy=multi-user.target
