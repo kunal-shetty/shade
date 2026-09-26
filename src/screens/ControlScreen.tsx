@@ -10,6 +10,7 @@ import { AdminLock } from '../components/AdminLock';
 import { JoystickPad } from '../components/JoystickPad';
 import { ArcGauge } from '../components/Gauges';
 import { Card, PrimaryButton, SectionHeader } from '../components/ui';
+import { VoiceControl } from '../components/VoiceControl';
 import { createJoystickSender, sendRoverCommand } from '../services/roverLink';
 
 const SpeedSlider = ({ value, onChange, disabled }: { value: number; onChange: (v: number) => void; disabled: boolean }) => {
@@ -139,6 +140,8 @@ export const ControlScreen = () => {
         <Card>
           <SpeedSlider value={speedLimit} onChange={setSpeedLimit} disabled={!isAdmin} />
         </Card>
+
+        <VoiceControl />
 
         <SectionHeader icon="extension-puzzle" title="Drive Commands" />
         <View style={styles.btnGrid}>
