@@ -24,6 +24,7 @@ import os
 import queue
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from contextlib import asynccontextmanager
@@ -80,6 +81,16 @@ class Config:
     hostname: str = os.getenv("CS_HOSTNAME", "cybersentinel")
     enable_mdns: bool = os.getenv("CS_ENABLE_MDNS", "1") != "0"
     incident_store: Path = Path(os.getenv("CS_INCIDENT_STORE", "incidents.json"))
+    # Camera / MJPEG stream
+    camera_enable: bool = os.getenv("CS_CAMERA_ENABLE", "1") != "0"
+    camera_device: str = os.getenv("CS_CAMERA_DEVICE", "/dev/video0")
+    camera_port: int = int(os.getenv("CS_CAMERA_PORT", "8080"))
+    camera_size: str = os.getenv("CS_CAMERA_SIZE", "640x480")
+    camera_fps: int = int(os.getenv("CS_CAMERA_FPS", "20"))
+    camera_rotate: str = os.getenv("CS_CAMERA_ROTATE", "0")  # 0 | 90 | 180 | 270
+    # Optional v4l2 control applied for night mode, e.g. "exposure_auto=1"
+    camera_night_ctrl: str = os.getenv("CS_CAMERA_NIGHT_CTRL", "")
+    record_dir: Path = Path(os.getenv("CS_RECORD_DIR", "recordings"))
 
 
 CFG = Config()
@@ -259,6 +270,183 @@ class MotorBus:
 
 
 MOTORS = MotorBus(CFG)
+
+
+# ---------------------------------------------------------------------------
+# CAMERA — supervised MJPEG stream for the app's live feed
+# ---------------------------------------------------------------------------
+
+class CameraManager:
+    """Owns the MJPEG stream the app renders at `/stream.mjpg`.
+
+    ffmpeg itself serves the HTTP endpoint (`-listen 1`), so provisionning needs
+    no extra systemd unit: the gateway starts, restarts and stops it. Recording
+    reads back off that same HTTP stream instead of `/dev/video0`, which avoids
+    two processes fighting over the capture device.
+    """
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self._proc: subprocess.Popen | None = None
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self.night = False
+        self.reason = "disabled" if not cfg.camera_enable else "starting"
+        try:
+            self.cfg.record_dir.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        self._thread = threading.Thread(target=self._loop, name="camera", daemon=True)
+        self._thread.start()
+
+    @property
+    def online(self) -> bool:
+        with self._lock:
+            return bool(self._proc and self._proc.poll() is None)
+
+    @property
+    def device_present(self) -> bool:
+        return Path(self.cfg.camera_device).exists()
+
+    def _stream_cmd(self) -> list[str]:
+        filters: list[str] = []
+        if self.cfg.camera_rotate == "180":
+            filters.append("hflip,vflip")
+        elif self.cfg.camera_rotate == "90":
+            filters.append("transpose=1")
+        elif self.cfg.camera_rotate == "270":
+            filters.append("transpose=2")
+        if self.night:
+            # Software low-light boost; hardware IR is handled by camera_night_ctrl.
+            filters.append("eq=brightness=0.18:contrast=1.35:saturation=0.6")
+
+        cmd = [
+            "ffmpeg", "-nostdin", "-loglevel", "warning",
+            "-f", "v4l2", "-framerate", str(self.cfg.camera_fps),
+            "-video_size", self.cfg.camera_size, "-i", self.cfg.camera_device,
+        ]
+        if filters:
+            cmd += ["-vf", ",".join(filters)]
+        cmd += [
+            "-f", "mpjpeg", "-listen", "1",
+            "-headers", "Access-Control-Allow-Origin: *\r\n",
+            f"http://0.0.0.0:{self.cfg.camera_port}/stream.mjpg",
+        ]
+        return cmd
+
+    def _loop(self) -> None:
+        if not self.cfg.camera_enable:
+            self.reason = "disabled"
+            return
+        if not shutil.which("ffmpeg"):
+            self.reason = "ffmpeg not installed"
+            print("[camera] ffmpeg is missing — install it with `apt-get install ffmpeg`")
+            return
+
+        log_path = Path(tempfile.gettempdir()) / "cybersentinel-camera.log"
+        while not self._stop.is_set():
+            if not self.device_present:
+                self.reason = f"{self.cfg.camera_device} not present"
+                self._stop.wait(5)
+                continue
+            try:
+                with open(log_path, "wb") as logf:
+                    with self._lock:
+                        self._proc = subprocess.Popen(
+                            self._stream_cmd(), stdout=subprocess.DEVNULL, stderr=logf
+                        )
+                        proc = self._proc
+                self.reason = "streaming"
+                print(f"[camera] MJPEG on :{self.cfg.camera_port}/stream.mjpg "
+                      f"({self.cfg.camera_size}@{self.cfg.camera_fps}, night={self.night})")
+                proc.wait()
+                if not self._stop.is_set():
+                    tail = read_tail(log_path)
+                    self.reason = tail or f"ffmpeg exited with code {proc.returncode}"
+                    print(f"[camera] ffmpeg exited: {self.reason}")
+            except Exception as exc:
+                self.reason = str(exc)
+                print(f"[camera] error: {exc}")
+            finally:
+                with self._lock:
+                    self._proc = None
+            self._stop.wait(3)
+
+    def _restart(self) -> None:
+        """Kill the stream so the supervisor respawns it with the new filters."""
+        with self._lock:
+            if self._proc is not None and self._proc.poll() is None:
+                self._proc.terminate()
+
+    def set_night_mode(self, on: bool) -> dict:
+        want = bool(on)
+        hardware = None
+        if self.cfg.camera_night_ctrl and shutil.which("v4l2-ctl"):
+            try:
+                subprocess.run(
+                    ["v4l2-ctl", "-d", self.cfg.camera_device, "--set-ctrl", self.cfg.camera_night_ctrl],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                )
+                hardware = self.cfg.camera_night_ctrl
+            except Exception:
+                hardware = None
+        if want != self.night:
+            self.night = want
+            self._restart()
+        return {"ok": True, "night_mode": self.night, "hardware_control": hardware}
+
+    def record(self, seconds: int = 15) -> dict:
+        if not self.online:
+            return {"ok": False, "detail": self.reason or "camera stream is not running"}
+        seconds = max(1, min(120, int(seconds)))
+        path = self.cfg.record_dir / f"clip-{time.strftime('%Y%m%d-%H%M%S')}.mkv"
+        url = f"http://127.0.0.1:{self.cfg.camera_port}/stream.mjpg"
+        cmd = [
+            "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
+            "-f", "mpjpeg", "-i", url,
+            "-t", str(seconds), "-c:v", "copy", str(path),
+        ]
+
+        def run() -> None:
+            try:
+                subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                               timeout=seconds + 20, check=False)
+                print(f"[camera] recorded {seconds}s -> {path}")
+            except Exception as exc:
+                print(f"[camera] recording failed: {exc}")
+            finally:
+                STATE.recording = False
+
+        STATE.recording = True
+        threading.Thread(target=run, name="camera-record", daemon=True).start()
+        return {"ok": True, "path": str(path), "seconds": seconds}
+
+    def status(self) -> dict:
+        return {
+            "online": self.online,
+            "device": self.cfg.camera_device,
+            "device_present": self.device_present,
+            "port": self.cfg.camera_port,
+            "stream_url": f"http://{self.cfg.hostname}.local:{self.cfg.camera_port}/stream.mjpg",
+            "night_mode": self.night,
+            "recording": STATE.recording,
+            "detail": self.reason,
+        }
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._restart()
+
+
+def read_tail(path: Path, lines: int = 3) -> str:
+    try:
+        content = path.read_text(errors="replace").strip().splitlines()
+        return " ".join(content[-lines:])[:200]
+    except Exception:
+        return ""
+
+
+CAMERA = CameraManager(CFG)
 
 
 # ---------------------------------------------------------------------------
@@ -562,19 +750,43 @@ def stop_mdns() -> None:
 # FastAPI app
 # ---------------------------------------------------------------------------
 
+async def publish_health_loop() -> None:
+    """Publishes `device/health` so the app learns camera/Pi state over MQTT.
+
+    The app also polls GET /health, so this keeps working even when the broker
+    is unavailable.
+    """
+    while True:
+        payload = {
+            **STATE.device_health,
+            "arduino_door": "online" if MOTORS.connected else STATE.device_health.get("arduino_door", "offline"),
+            "rover": "online",
+            "camera": "online" if CAMERA.online else "offline",
+            "pi": pi_stats() or {},
+        }
+        mqtt_publish("device/health", payload)
+        await asyncio.sleep(10)
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     load_incidents()
     start_mqtt()
     start_mdns()
-    tasks = [asyncio.create_task(start_ws_server()), asyncio.create_task(read_arduino_serial())]
+    tasks = [
+        asyncio.create_task(start_ws_server()),
+        asyncio.create_task(read_arduino_serial()),
+        asyncio.create_task(publish_health_loop()),
+    ]
     print(f"[api] REST on :{CFG.api_port}  •  discovery name: {CFG.hostname}.local")
+    print(f"[api] camera: {CAMERA.status()['detail']}")
     try:
         yield
     finally:
         for task in tasks:
             task.cancel()
         stop_mdns()
+        CAMERA.stop()
         MOTORS.close()
         if MQTT is not None:
             MQTT.loop_stop()
@@ -615,6 +827,7 @@ async def health():
         **STATE.device_health,
         "arduino_door": "online" if MOTORS.connected else STATE.device_health.get("arduino_door", "offline"),
         "rover": "online",
+        "camera": "online" if CAMERA.online else "offline",
     }
     # The flat keys feed the app's device-health store; `devices` is the grouped
     # view used by humans/curl. `status`/`service` are what discovery probes for.
@@ -623,6 +836,7 @@ async def health():
         "service": "cybersentinel",
         **devices,
         "devices": devices,
+        "camera_info": CAMERA.status(),
         "pi": pi_stats(),
         "speaker": SPEAKER.engine,
         "uptime": int(time.time()),
@@ -660,15 +874,29 @@ async def alarm_reset():
 
 
 @app.post("/camera/record")
-async def camera_record():
-    STATE.recording = True
-    return {"ok": True}
+async def camera_record(body: dict | None = None):
+    seconds = int((body or {}).get("seconds", 15))
+    result = CAMERA.record(seconds)
+    if not result.get("ok"):
+        raise HTTPException(status_code=503, detail=result.get("detail", "camera unavailable"))
+    return result
 
 
 @app.post("/camera/nightmode")
-async def camera_nightmode():
-    STATE.night_mode = not STATE.night_mode
-    return {"ok": True, "night_mode": STATE.night_mode}
+async def camera_nightmode(body: dict | None = None):
+    # No body toggles; {"on": true|false} sets it explicitly.
+    body = body or {}
+    target = body.get("on")
+    if target is None:
+        target = not CAMERA.night
+    result = CAMERA.set_night_mode(bool(target))
+    STATE.night_mode = CAMERA.night
+    return result
+
+
+@app.get("/camera/status")
+async def camera_status():
+    return CAMERA.status()
 
 
 @app.post("/speak")
