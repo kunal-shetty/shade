@@ -319,22 +319,54 @@ if [[ -z "${HEALTH}" ]]; then
 else
   # The most common cause of a "stale" reading is an older gateway that was
   # started by hand (not by systemd) still holding the port, so the service's
-  # restart could never bind and the old code kept answering.
+  # restart could never bind and the old code kept answering forever. That
+  # process is invisible to `systemctl status`, which reports the new service
+  # as happily enabled, so the port owner has to be named explicitly.
   if [[ "${HEALTH}" != *'"version"'* ]]; then
     warn "The gateway answering on :${API_PORT} has no version field — it is an older build."
+    warn "  See the port owner diagnostic below."
+  elif [[ -n "${DEPLOYED_VERSION}" && "${HEALTH}" != *"\"${DEPLOYED_VERSION}\""* ]]; then
+    warn "The gateway on :${API_PORT} is NOT the build just deployed."
+    warn "  on disk : v${DEPLOYED_VERSION}"
+    warn "  answering: $(sed -n 's/.*"version": *"\([^"]*\)".*/v\1/p' <<<"${HEALTH}")"
+  fi
+
+  # Only run the ownership check when something actually looks wrong.
+  if [[ "${HEALTH}" != *"\"${DEPLOYED_VERSION}\""* ]]; then
+    PORT_PID="$(ss -ltnp 2>/dev/null | grep ":${API_PORT}" | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2)"
     warn "Port ${API_PORT} owner:"
-    ss -ltnp 2>/dev/null | grep ":${API_PORT}" >&2 || warn "  (unknown)"
-    warn "If that process was started by hand (e.g. 'python3 gateway.py'), kill it and re-run:"
-    warn "  sudo systemctl restart cybersentinel-gateway"
+    ss -ltnp 2>/dev/null | grep ":${API_PORT}" >&2 || warn "  (nothing is listening there)"
+    if [[ -n "${PORT_PID}" ]]; then
+      PORT_CMD="$(tr '\0' ' ' < "/proc/${PORT_PID}/cmdline" 2>/dev/null || true)"
+      PORT_DIR="$(readlink -f "/proc/${PORT_PID}/cwd" 2>/dev/null || true)"
+      SERVICE_PID="$(systemctl show -p MainPID --value cybersentinel-gateway 2>/dev/null || true)"
+      warn "  pid ${PORT_PID}: ${PORT_CMD:-unknown command}"
+      warn "  running from: ${PORT_DIR:-unknown}"
+      if [[ "${PORT_PID}" != "${SERVICE_PID}" ]]; then
+        warn "  ^ this is NOT the systemd service (whose MainPID is ${SERVICE_PID:-none})."
+        warn "  It is a leftover hand-started gateway squatting on the port, which is why"
+        warn "  the service could never bind and your changes never took effect. Kill it:"
+        warn "    sudo kill ${PORT_PID} && sudo systemctl restart cybersentinel-gateway"
+      else
+        warn "  The service owns the port but is serving old code — it did not pick up the"
+        warn "  new gateway.py. Restart it:  sudo systemctl restart cybersentinel-gateway"
+      fi
+    fi
   fi
   # ASCII only: a C/POSIX locale makes Python's stdout non-UTF-8, and printing
   # box-drawing or check characters there raises UnicodeEncodeError.
-  HEALTH="${HEALTH}" PYTHONIOENCODING=utf-8 python3 - <<'PY'
+  HEALTH="${HEALTH}" EXPECTED="${DEPLOYED_VERSION}" PYTHONIOENCODING=utf-8 python3 - <<'PY'
 import json, os
 
 data = json.loads(os.environ["HEALTH"])
 running = data.get("version")
-print(f"    {'[ok]' if running else '[!!]'} version : {running or 'MISSING - the deployed gateway.py is stale'}")
+expected = os.environ.get("EXPECTED") or ""
+if running and expected and running != expected:
+    print(f"    [!!] version : {running} - but v{expected} is deployed; the running process is old")
+elif running:
+    print(f"    [ok] version : {running}")
+else:
+    print("    [!!] version : MISSING - the deployed gateway.py is stale")
 print(f"    {'[ok]' if data.get('speaker') else '[!!]'} speaker : {data.get('speaker') or 'no TTS engine found'}")
 cam = data.get("camera_info")
 if cam is None:
