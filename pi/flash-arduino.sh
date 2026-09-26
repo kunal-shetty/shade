@@ -100,25 +100,11 @@ else
   log "AVR core installed"
 fi
 
-log "Installing the sketch's libraries (U8g2, ArduinoJson)"
+# U8g2 is the only library the sketch needs: its serial protocol is written out
+# by hand, because on an Uno a JSON document costs RAM the sketch cannot spare.
+log "Installing the sketch's library (U8g2)"
 run_as_user arduino-cli lib install "U8g2" >/dev/null 2>&1 \
   || warn "U8g2 install failed — compilation will fail until it is present."
-
-# ArduinoJson 7 removed StaticJsonDocument, which the sketch uses, so pin 6.x.
-if run_as_user arduino-cli lib install "ArduinoJson@6.21.5" >/dev/null 2>&1; then
-  log "ArduinoJson 6.21.5 installed"
-else
-  warn "Could not pin ArduinoJson 6.21.5; installing the latest instead."
-  run_as_user arduino-cli lib install "ArduinoJson" >/dev/null 2>&1 \
-    || warn "ArduinoJson install failed."
-  # `lib list` columns are: Name Installed Available Location Description.
-  ARDUINOJSON_VERSION="$(run_as_user arduino-cli lib list 2>/dev/null \
-    | awk '$1 ~ /^ArduinoJson/ {print $2}' | head -1)"
-  if [[ "${ARDUINOJSON_VERSION}" == 7* ]]; then
-    warn "ArduinoJson ${ARDUINOJSON_VERSION} is installed, but arduino.cpp needs 6.x"
-    warn "(v7 removed StaticJsonDocument). Install it by hand if compilation fails."
-  fi
-fi
 
 # ---------------------------------------------------------------------------
 # Stage the sketch
@@ -137,12 +123,19 @@ if ! COMPILE_OUT="$(run_as_user arduino-cli compile --fqbn "${FQBN}" \
       "${WORK_DIR}/${SKETCH_NAME}" 2>&1)"; then
   warn "Compilation failed:"
   printf '%s\n' "${COMPILE_OUT}" >&2
-  warn "Most common cause: a missing library. Install U8g2 and ArduinoJson 6.x."
+  if grep -qi 'not enough memory\|data section exceeds' <<<"${COMPILE_OUT}"; then
+    warn "The sketch does not fit in the Uno's 2 KB of RAM. Two display objects and"
+    warn "hand-written JSON are what keep it inside the budget — check whether both"
+    warn "are still in place in arduino.cpp."
+  else
+    warn "Most common cause: the U8g2 library is missing."
+  fi
   exit 1
 fi
 log "Compiled cleanly"
-# The Uno only has 2 KB of SRAM, so the memory report is worth showing: the
-# three OLEDs use page buffers precisely to stay inside this budget.
+# The Uno only has 2 KB of RAM, so the memory report is worth showing. Watch for
+# the dynamic figure creeping past ~80%: that is when the stack starts to be at
+# risk, even though the compile still succeeds.
 printf '%s\n' "${COMPILE_OUT}" \
   | grep -iE 'Sketch uses|Global variables' | sed 's/^/      /' || true
 
