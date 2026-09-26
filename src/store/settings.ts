@@ -14,6 +14,10 @@ export interface ConnectionSettings {
   streamPort: number;
   autoReconnect: boolean;
   demoMode: boolean;
+  /** Automatically find the Pi on the current WiFi (mDNS then subnet scan). */
+  autoDiscover: boolean;
+  /** mDNS name advertised by the Pi via Avahi. */
+  hostname: string;
 }
 
 export interface Preferences {
@@ -22,6 +26,14 @@ export interface Preferences {
   darkMode: DarkModeSetting;
   streamQuality: StreamQuality;
   adminTimeoutMin: 15 | 30 | 60;
+  /** BCP-47 locale used for on-device speech recognition. */
+  voiceLanguage: string;
+  /** Below this JEV confidence the app asks for a repeat instead of acting. */
+  voiceMinConfidence: number;
+  /** Send the spoken reply to the Raspberry Pi's speaker. */
+  piSpeakerEnabled: boolean;
+  /** Fall back to the phone's speaker when the Pi is unreachable. */
+  phoneSpeakerFallback: boolean;
 }
 
 interface SettingsState {
@@ -35,13 +47,15 @@ export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
       connection: {
-        host: '192.168.0.115',
+        host: 'cybersentinel.local',
         wsPort: 8765,
-        mqttPort: 1883,
+        mqttPort: 9001,
         apiPort: 8000,
-      streamPort: 5000,
+      streamPort: 8080,
       autoReconnect: true,
       demoMode: false,
+      autoDiscover: true,
+      hostname: 'cybersentinel.local',
     },
       prefs: {
         pushEnabled: true,
@@ -49,6 +63,10 @@ export const useSettings = create<SettingsState>()(
         darkMode: 'system',
         streamQuality: 'medium',
         adminTimeoutMin: 30,
+        voiceLanguage: 'en-US',
+        voiceMinConfidence: 0.55,
+        piSpeakerEnabled: true,
+        phoneSpeakerFallback: true,
       },
       setConnection: (patch) => set((s) => ({ connection: { ...s.connection, ...patch } })),
       setPrefs: (patch) => set((s) => ({ prefs: { ...s.prefs, ...patch } })),
