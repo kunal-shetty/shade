@@ -144,6 +144,15 @@ mkdir -p "${INSTALL_DIR}"
 install -m 644 "${REPO_DIR}/gateway.py" "${INSTALL_DIR}/gateway.py"
 [[ -f "${INSTALL_DIR}/gateway.env" ]] || install -m 644 "${REPO_DIR}/pi/gateway.env.example" "${INSTALL_DIR}/gateway.env"
 
+# Make it obvious which build landed on disk — a stale clone deploys a stale gateway.
+DEPLOYED_VERSION="$(grep -oE 'GATEWAY_VERSION = "[^"]+"' "${INSTALL_DIR}/gateway.py" | head -1 | cut -d'"' -f2)"
+if [[ -z "${DEPLOYED_VERSION}" ]]; then
+  warn "The gateway.py in this clone has no GATEWAY_VERSION — it is out of date."
+  warn "Run 'git pull' in ${REPO_DIR} and re-run this script."
+else
+  log "Deployed gateway.py: v${DEPLOYED_VERSION}"
+fi
+
 log "Creating Python virtualenv"
 python3 -m venv "${INSTALL_DIR}/venv" || die "Could not create the virtualenv"
 "${INSTALL_DIR}/venv/bin/pip" install --upgrade pip || warn "pip upgrade failed"
@@ -163,16 +172,66 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Boot persistence — every service must come back after a power cycle
+# ---------------------------------------------------------------------------
+log "Ensuring services start on boot"
+BOOT_FAILURES=0
+for svc in avahi-daemon mosquitto cybersentinel-gateway; do
+  systemctl enable "${svc}" >/dev/null 2>&1 || true
+  if systemctl is-enabled "${svc}" >/dev/null 2>&1; then
+    printf '    \033[1;32m✓\033[0m %s (enabled)\n' "${svc}"
+  else
+    printf '    \033[1;31m✗\033[0m %s (NOT enabled)\n' "${svc}"
+    BOOT_FAILURES=$((BOOT_FAILURES + 1))
+  fi
+done
+[[ ${BOOT_FAILURES} -eq 0 ]] || warn "Some services will not start on boot — see above."
+
+# ---------------------------------------------------------------------------
+# Verification — prove the running gateway is the build we just installed
+# ---------------------------------------------------------------------------
+API_PORT="$(grep -E '^CS_API_PORT=' "${INSTALL_DIR}/gateway.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+API_PORT="${API_PORT:-8000}"
+
+log "Verifying the gateway on port ${API_PORT}"
+sleep 2
+HEALTH="$(curl -fsS --max-time 6 "http://127.0.0.1:${API_PORT}/health" 2>/dev/null || true)"
+if [[ -z "${HEALTH}" ]]; then
+  warn "No answer from http://127.0.0.1:${API_PORT}/health"
+  warn "Inspect: journalctl -u cybersentinel-gateway -n 40 --no-pager"
+else
+  # ASCII only: a C/POSIX locale makes Python's stdout non-UTF-8, and printing
+  # box-drawing or check characters there raises UnicodeEncodeError.
+  HEALTH="${HEALTH}" PYTHONIOENCODING=utf-8 python3 - <<'PY'
+import json, os
+
+data = json.loads(os.environ["HEALTH"])
+running = data.get("version")
+print(f"    {'[ok]' if running else '[!!]'} version : {running or 'MISSING - the deployed gateway.py is stale'}")
+print(f"    {'[ok]' if data.get('speaker') else '[!!]'} speaker : {data.get('speaker') or 'no TTS engine found'}")
+cam = data.get("camera_info")
+if cam is None:
+    print("    [!!] camera  : no camera_info - the deployed gateway.py is stale")
+else:
+    mark = "[ok]" if cam.get("online") else "[--]"
+    print(f"    {mark} camera  : {'online' if cam.get('online') else 'offline'} - {cam.get('detail')}")
+print(f"    [--] arduino : {data.get('arduino_door')}")
+PY
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 IP="$(hostname -I | awk '{print $1}')"
 cat <<EOF
 
-  Gateway:   http://${HOSTNAME_TARGET}.local:8000/health   (IP ${IP})
+  Gateway:   http://${HOSTNAME_TARGET}.local:${API_PORT}/health   (IP ${IP})
   WebSocket: ws://${HOSTNAME_TARGET}.local:8765
   MQTT/WS:   ws://${HOSTNAME_TARGET}.local:9001
   Logs:      journalctl -u cybersentinel-gateway -f
              journalctl -u mosquitto -f
+
+  All services are enabled, so a power cycle brings everything back up.
 
   Speaker check:
     speaker-test -t sine -f 440 -l 1
