@@ -1,3 +1,7 @@
+# NOTE: picamera2 is deliberately NOT listed here. It ships as the apt package
+# python3-picamera2 (bound to libcamera), so setup.sh installs it via apt and
+# builds the venv with --system-site-packages instead of pip-installing it.
+
 fastapi>=0.115
 uvicorn[standard]>=0.32
 websockets>=13
