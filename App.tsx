@@ -13,6 +13,7 @@ import { connectRoverLink, disconnectRoverLink } from './src/services/roverLink'
 import { startDemoEngine, stopDemoEngine } from './src/services/demoEngine';
 import { registerPushToken } from './src/services/notifications';
 import { startAutoDiscovery } from './src/services/discovery';
+import { startHealthPolling } from './src/services/health';
 import { initVoice } from './src/services/voice';
 
 export default function App() {
@@ -26,6 +27,7 @@ export default function App() {
 
   const [servicesReady, setServicesReady] = useState(false);
   const stopDiscoveryRef = useRef<(() => void) | null>(null);
+  const stopHealthRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     // connect after settings rehydrate from AsyncStorage
@@ -49,6 +51,8 @@ export default function App() {
       connectMqtt();
       connectRoverLink();
       void registerPushToken();
+      // HTTP fallback for device/camera health when the broker is unavailable.
+      stopHealthRef.current = startHealthPolling();
 
       let cancelled = false;
       void startAutoDiscovery(() => {
@@ -66,6 +70,8 @@ export default function App() {
     return () => {
       stopDiscoveryRef.current?.();
       stopDiscoveryRef.current = null;
+      stopHealthRef.current?.();
+      stopHealthRef.current = null;
       stopDemoEngine();
       disconnectMqtt();
       disconnectRoverLink();
