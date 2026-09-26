@@ -13,8 +13,7 @@
 # the provisioning, so you can fix the broker afterwards.
 set -uo pipefail
 
-REPO_DIR="$(cd "$(di
-rname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_DIR="/opt/cybersentinel"
 RUN_USER="${SUDO_USER:-pi}"
 HOSTNAME_TARGET="cybersentinel"
