@@ -106,41 +106,99 @@ The Arduino drives the motors from `FORWARD` / `BACKWARD` / `LEFT` / `RIGHT` /
 
 ## 4. Camera
 
-The MJPEG stream on port 8080 is **served by the gateway itself** — there is no
-separate service to install. It supervises `ffmpeg` and restarts it if the
-camera is unplugged or the stream dies.
+The gateway **serves the MJPEG stream itself** on port 8080 — there is no
+separate camera service to enable, and it survives a camera being unplugged or
+replugged. Whatever hardware you have, the app always consumes the same URL:
 
-```bash
-curl -s http://cybersentinel.local:8000/camera/status
-# {"online":true,"device":"/dev/video0","stream_url":"...",...}
-
-# Open the stream yourself
-ffplay http://cybersentinel.local:8080/stream.mjpg
+```
+http://cybersentinel.local:8080/stream.mjpg
 ```
 
-Configuration (in `/opt/cybersentinel/gateway.env`, then
-`sudo systemctl restart cybersentinel-gateway`):
+### Pick a source
+
+Set `CS_CAMERA_SOURCE` in `/opt/cybersentinel/gateway.env`, then
+`sudo systemctl restart cybersentinel-gateway`.
+
+| Value | Use when | Needs |
+|-------|----------|-------|
+| `auto` (default) | you don't care — it probes | — |
+| `picamera` | **CSI Camera Module** (the ribbon cable) | `python3-picamera2` |
+| `usb` | USB webcam | `ffmpeg`, `/dev/video0` |
+| `external` | you already run your own MJPEG server | `CS_CAMERA_EXTERNAL_URL` |
+| `off` | no camera | — |
+
+`auto` resolves in this order: **picamera → external → usb**.
+
+#### CSI Camera Module (Picamera2)
+
+This is the usual Raspberry Pi setup. `setup.sh` installs `python3-picamera2`
+and builds the venv with `--system-site-packages` (picamera2 is an apt package,
+so a normal venv cannot import it). The gateway drives it through Picamera2's
+own MJPEG encoder — no OpenCV needed.
+
+```bash
+rpicam-hello -t 2000          # does the sensor work at all?
+curl -s http://cybersentinel.local:8000/camera/status | grep -o '"source":"[^"]*"'
+```
+
+#### Already running your own camera server
+
+If you keep a Flask/Picamera2 script like this:
+
+```python
+# ... camera.capture_array() ... cv2.imencode(".jpg", frame) ...
+app.run(host="0.0.0.0", port=5000, threaded=True)
+```
+
+you don't have to remove it. Point the gateway at it and the app keeps using
+port 8080, so nothing in the app changes:
+
+```bash
+CS_CAMERA_SOURCE=external
+CS_CAMERA_EXTERNAL_URL=http://127.0.0.1:5000/video
+```
+
+The gateway proxies those frames, adds `/snapshot.jpg`, and reports online/
+offline for you. Do **not** point `external` at the gateway's own 8080 — that
+would loop back on itself.
+
+### Endpoints
+
+```bash
+curl -s http://cybersentinel.local:8000/camera/status     # online, source, detail
+curl -s http://cybersentinel.local:8080/stream.mjpg       # the live stream
+curl -s http://cybersentinel.local:8080/snapshot.jpg -o shot.jpg
+ffplay  http://cybersentinel.local:8080/stream.mjpg       # view in a player
+```
+
+A plain browser visit to `http://cybersentinel.local:8080/` shows a preview page.
+
+### Configuration
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
 | `CS_CAMERA_ENABLE` | `1` | Serve the stream at all |
-| `CS_CAMERA_DEVICE` | `/dev/video0` | Capture device |
-| `CS_CAMERA_SIZE` / `CS_CAMERA_FPS` | `640x480` / `20` | Capture resolution and rate |
-| `CS_CAMERA_ROTATE` | `0` | `90`/`180`/`270` for upside-down mounts |
-| `CS_CAMERA_NIGHT_CTRL` | _(unset)_ | v4l2 control for hardware night mode, e.g. `exposure_auto=1` |
+| `CS_CAMERA_SOURCE` | `auto` | Backend selection (above) |
+| `CS_CAMERA_EXTERNAL_URL` | _(unset)_ | Upstream MJPEG URL for `external` |
+| `CS_CAMERA_DEVICE` | `/dev/video0` | Capture device for `usb` |
+| `CS_CAMERA_SIZE` / `CS_CAMERA_FPS` | `640x480` / `20` | Resolution and rate |
+| `CS_CAMERA_ROTATE` | `0` | `90`/`180`/`270` for upside-down mounts (`usb` only) |
+| `CS_CAMERA_NIGHT_CTRL` | _(unset)_ | v4l2 control for hardware night mode (`usb` only) |
 | `CS_RECORD_DIR` | `/opt/cybersentinel/recordings` | Where 15 s clips are saved |
 
-App controls:
+### App controls
 
 * **Record 15 s** → `POST /camera/record` writes an `.mkv` into `CS_RECORD_DIR`.
-  It records by reading the live MJPEG stream back over HTTP, so it never
-  fights the capture device for `/dev/video0`.
-* **Night mode** → `POST /camera/nightmode` applies `CS_CAMERA_NIGHT_CTRL` (if
-  set) and/or restarts the stream with a low-light `eq` filter.
+  It records by reading the live stream back over HTTP, so it never fights the
+  capture device for exclusive access.
+* **Night mode** → `POST /camera/nightmode`. For `picamera` it adjusts
+  Brightness/Contrast/Saturation live; for `usb` it applies the low-light `eq`
+  filter (and `CS_CAMERA_NIGHT_CTRL` if set). The response says whether the
+  active source supports it.
 * **Screenshot** / **Zoom** are client-side.
 
-If you have no camera module, set `CS_CAMERA_ENABLE=0`; the app then shows
-"Camera offline" instead of a broken feed.
+If there is no camera, `/camera/status` explains why in `detail` and the app
+shows a "Camera offline" overlay instead of a broken feed.
 
 ## 5. How the phone finds the Pi
 
