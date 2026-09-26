@@ -81,7 +81,7 @@ class Config:
     # espeak takes a base language plus an optional voice *variant*: "en+f3" is
     # a light, friendly female voice. An unknown variant falls back to the base
     # language automatically, so this is always safe to set.
-    tts_voice: str = os.getenv("CS_TTS_VOICE", "en+f3")
+    tts_voice: str = os.getenv("CS_TTS_VOICE", "en+f3")  # +f* variants are female
     tts_rate: int = int(os.getenv("CS_TTS_RATE", "165"))
     tts_pitch: int = int(os.getenv("CS_TTS_PITCH", "70"))  # 0-99, higher = chirpier
     piper_model: str = os.getenv("CS_PIPER_MODEL", "")  # e.g. /opt/piper/en_US-lessac-medium.onnx
@@ -110,12 +110,19 @@ CFG = Config()
 
 # Bumped whenever the deployed behaviour changes, so `/health` and setup.sh can
 # prove which gateway build is actually running on the Pi.
-GATEWAY_VERSION = "1.3.0"
+GATEWAY_VERSION = "1.4.0"
 
 
 # ---------------------------------------------------------------------------
 # SPEAKER — text-to-speech on the Pi's speaker
 # ---------------------------------------------------------------------------
+
+# espeak's bare language codes ("en") select its male voice; the "+f*" variants
+# are the female ones, in roughly descending order of how natural they sound.
+# Tried in order so an unsupported variant does not silently turn the speaker
+# male.
+FEMALE_VOICE_FALLBACKS = ("en+f3", "en+f4", "en+f2", "en-us+f3", "en+f1")
+
 
 class Speaker:
     """Serialised TTS worker.
@@ -144,26 +151,41 @@ class Speaker:
             return f"{self.engine} ({self.voice}, pitch {self.cfg.tts_pitch})"
         return self.engine
 
-    def _resolve_voice(self) -> str:
-        """Downgrade "en+f3" to "en" when the engine doesn't know the variant.
+    def _voice_supported(self, voice: str) -> bool:
+        """espeak exits non-zero for a voice it does not know."""
+        probe = subprocess.run(
+            [self.engine, "-v", voice, "-q", "ok"],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+        )
+        return probe.returncode == 0
 
-        espeak exits non-zero for an unknown voice, and without this check the
-        gateway would fail to speak at all rather than fall back.
+    def _resolve_voice(self) -> str:
+        """Pick a voice we can actually run, preferring a female one.
+
+        A bare language such as "en" is espeak's *male* default, so falling
+        straight back to it would quietly swap the speaker's voice. Instead we
+        walk a list of known female variants and only drop to the base language
+        as a last resort, where speaking at all still beats staying silent.
         """
         want = (self.cfg.tts_voice or "en").strip()
         if self.engine not in ("espeak-ng", "espeak"):
             return want
+
+        candidates = [want] + [v for v in FEMALE_VOICE_FALLBACKS if v != want]
         try:
-            probe = subprocess.run(
-                [self.engine, "-v", want, "-q", "ok"],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
-            )
-            if probe.returncode == 0:
-                return want
-            print(f"[tts] voice '{want}' is not supported by {self.engine}; using the base language")
+            for voice in candidates:
+                if self._voice_supported(voice):
+                    if voice != want:
+                        print(f"[tts] voice '{want}' is unavailable; using the female "
+                              f"voice '{voice}' instead")
+                    return voice
         except Exception:
             pass
-        return want.split("+", 1)[0] or "en"
+
+        base = want.split("+", 1)[0] or "en"
+        print(f"[tts] no female voice available for '{want}'; "
+              f"falling back to '{base}' (may sound male)")
+        return base
 
     def _detect_engine(self) -> str | None:
         if self.cfg.tts_engine == "none":
