@@ -60,6 +60,32 @@ fi
 systemctl enable --now avahi-daemon || warn "avahi-daemon did not start"
 
 # ---------------------------------------------------------------------------
+# Serial access (the Arduino)
+#
+# The gateway runs as ${RUN_USER} and opens /dev/ttyACM0 (a genuine Uno R3,
+# CDC-ACM) or /dev/ttyUSB0 (CH340/CP2102 clones). Both nodes are root:dialout
+# 0660, so the service user MUST be in the dialout group — otherwise every
+# open fails with "Permission denied" and the app shows the Arduino as offline
+# no matter how solidly the USB cable is plugged in.
+# ---------------------------------------------------------------------------
+log "Granting ${RUN_USER} access to the Arduino serial ports (dialout group)"
+if id -nG "${RUN_USER}" 2>/dev/null | tr ' ' '\n' | grep -qx dialout; then
+  log "${RUN_USER} is already in the dialout group"
+else
+  usermod -aG dialout "${RUN_USER}" \
+    && log "Added ${RUN_USER} to dialout (reboot for it to apply)" \
+    || warn "Could not add ${RUN_USER} to dialout"
+fi
+
+SERIAL_FOUND="$(ls /dev/ttyACM* /dev/ttyUSB* 2>/dev/null | head -1 || true)"
+if [[ -n "${SERIAL_FOUND}" ]]; then
+  log "Arduino serial port detected: ${SERIAL_FOUND}"
+else
+  warn "No /dev/ttyACM* or /dev/ttyUSB* device found right now."
+  warn "Plug the Arduino into the Pi, then re-run: sudo bash pi/setup.sh"
+fi
+
+# ---------------------------------------------------------------------------
 # Mosquitto
 #
 # Two things routinely break this on Raspberry Pi OS:
