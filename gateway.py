@@ -78,8 +78,12 @@ class Config:
     serial_port: str = os.getenv("CS_SERIAL_PORT", "/dev/ttyUSB0")
     serial_baud: int = int(os.getenv("CS_SERIAL_BAUD", "115200"))
     tts_engine: str = os.getenv("CS_TTS_ENGINE", "auto")  # auto | espeak-ng | espeak | spd-say | none
-    tts_voice: str = os.getenv("CS_TTS_VOICE", "en")
+    # espeak takes a base language plus an optional voice *variant*: "en+f3" is
+    # a light, friendly female voice. An unknown variant falls back to the base
+    # language automatically, so this is always safe to set.
+    tts_voice: str = os.getenv("CS_TTS_VOICE", "en+f3")
     tts_rate: int = int(os.getenv("CS_TTS_RATE", "165"))
+    tts_pitch: int = int(os.getenv("CS_TTS_PITCH", "70"))  # 0-99, higher = chirpier
     piper_model: str = os.getenv("CS_PIPER_MODEL", "")  # e.g. /opt/piper/en_US-lessac-medium.onnx
     hostname: str = os.getenv("CS_HOSTNAME", "cybersentinel")
     enable_mdns: bool = os.getenv("CS_ENABLE_MDNS", "1") != "0"
@@ -106,7 +110,7 @@ CFG = Config()
 
 # Bumped whenever the deployed behaviour changes, so `/health` and setup.sh can
 # prove which gateway build is actually running on the Pi.
-GATEWAY_VERSION = "1.2.0"
+GATEWAY_VERSION = "1.3.0"
 
 
 # ---------------------------------------------------------------------------
@@ -126,9 +130,40 @@ class Speaker:
         self._current: subprocess.Popen | None = None
         self._lock = threading.Lock()
         self.engine = self._detect_engine()
+        self.voice = self._resolve_voice()
         self._thread = threading.Thread(target=self._worker, name="tts", daemon=True)
         self._thread.start()
-        print(f"[tts] engine = {self.engine or 'none (text will only be logged)'}")
+        print(f"[tts] engine = {self.engine or 'none (text will only be logged)'}"
+              + (f", voice = {self.voice}" if self.engine in ("espeak-ng", "espeak") else ""))
+
+    def describe(self) -> str:
+        """Human-readable summary for /health."""
+        if not self.engine:
+            return "none"
+        if self.engine in ("espeak-ng", "espeak"):
+            return f"{self.engine} ({self.voice}, pitch {self.cfg.tts_pitch})"
+        return self.engine
+
+    def _resolve_voice(self) -> str:
+        """Downgrade "en+f3" to "en" when the engine doesn't know the variant.
+
+        espeak exits non-zero for an unknown voice, and without this check the
+        gateway would fail to speak at all rather than fall back.
+        """
+        want = (self.cfg.tts_voice or "en").strip()
+        if self.engine not in ("espeak-ng", "espeak"):
+            return want
+        try:
+            probe = subprocess.run(
+                [self.engine, "-v", want, "-q", "ok"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5,
+            )
+            if probe.returncode == 0:
+                return want
+            print(f"[tts] voice '{want}' is not supported by {self.engine}; using the base language")
+        except Exception:
+            pass
+        return want.split("+", 1)[0] or "en"
 
     def _detect_engine(self) -> str | None:
         if self.cfg.tts_engine == "none":
@@ -177,7 +212,8 @@ class Speaker:
             return proc
         if self.engine in ("espeak-ng", "espeak"):
             return subprocess.Popen(
-                [self.engine, "-v", self.cfg.tts_voice, "-s", str(self.cfg.tts_rate), text],
+                [self.engine, "-v", self.voice, "-s", str(self.cfg.tts_rate),
+                 "-p", str(self.cfg.tts_pitch), text],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         if self.engine == "spd-say":
@@ -1177,7 +1213,7 @@ async def health():
         "devices": devices,
         "camera_info": CAMERA.status(),
         "pi": pi_stats(),
-        "speaker": SPEAKER.engine,
+        "speaker": SPEAKER.describe(),
         "uptime": int(time.time()),
     }
 
@@ -1294,7 +1330,12 @@ async def patch_incident(incident_id: int, body: dict):
 @app.get("/voice/status")
 async def voice_status():
     """Small helper so the app/Settings can confirm the speaker is ready."""
-    return {"tts_engine": SPEAKER.engine, "pi": pi_stats()}
+    return {
+        "tts_engine": SPEAKER.engine,
+        "tts_voice": SPEAKER.voice,
+        "tts_pitch": CFG.tts_pitch,
+        "pi": pi_stats(),
+    }
 
 
 if __name__ == "__main__":
