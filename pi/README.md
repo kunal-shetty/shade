@@ -119,9 +119,9 @@ curl -X POST http://cybersentinel.local:8000/speak \
 
 ## 3. Arduino
 
-Flash `arduino.cpp` (install the `ArduinoJson` library), then connect it over
-USB. The gateway reconnects to the serial port automatically, so replugging the
-Arduino does not require a restart.
+Flash `arduino.cpp` (install the `U8g2` library), then connect it over USB. The
+gateway reconnects to the serial port automatically, so replugging the Arduino
+does not require a restart.
 
 ```bash
 ls /dev/ttyUSB* /dev/ttyACM*          # see what is attached
@@ -161,8 +161,7 @@ sudo bash pi/flash-arduino.sh /dev/ttyACM0 # or name the port yourself
 ```
 
 The script installs `arduino-cli` (apt, falling back to Arduino's installer),
-adds the `arduino:avr` core and the `U8g2` + `ArduinoJson` libraries, then
-compiles and uploads.
+adds the `arduino:avr` core and the `U8g2` library, then compiles and uploads.
 
 > **It stops the gateway first.** The running service holds `/dev/ttyACM0`
 > open, and an upload against a held port fails with *resource busy*. The
@@ -190,8 +189,9 @@ Three SSD1306 panels are driven directly from the Uno:
 | OLED 2 | 5 V | `D4` = SDA, `D5` = SCL | software I2C |
 | OLED 3 | 5 V | `D6` = SDA, `D7` = SCL | software I2C |
 
-Install the **U8g2** library (Library Manager → "U8g2" by Oliver Kraus) as well
-as **ArduinoJson**. Both are required — the sketch will not compile without them.
+Install the **U8g2** library (Library Manager → "U8g2" by Oliver Kraus). It is
+the only library the sketch needs — it writes its serial JSON out by hand,
+because on an Uno a JSON document costs RAM the sketch cannot spare.
 
 What each panel shows:
 
@@ -199,10 +199,36 @@ What each panel shows:
 * **OLED 2** — door open/closed, the raw reed reading, and whether OLED 2/3 initialised
 * **OLED 3** — last command, error count, and the last error text
 
-The sketch uses U8g2's *page-buffered* drivers (`..._128X64_NONAME_1_...`). A
-full-frame buffer is 1 KB and three of them would overflow the Uno's 2 KB of
-SRAM, so do not switch these to the `_F_` variants. If your panels are 128x32,
-change `128X64` to `128X32` in the three constructor lines.
+### Fitting three displays into 2 KB of RAM
+
+This is the part that is easy to break. A first attempt at three panels did not
+compile at all:
+
+```
+Global variables use 2128 bytes (103%) of dynamic memory, leaving -80 bytes
+Error during build: data section exceeds available space in board
+```
+
+Two things keep it inside the Uno's 2048 bytes, and both matter:
+
+1. **Page-buffered drivers** (`..._128X64_NONAME_1_...`), not full-frame (`_F_`).
+   A full frame needs 1 KB of pixel buffer; page mode needs 128 bytes, and U8g2
+   *shares* that one buffer between page-mode displays.
+2. **One U8g2 object drives both software-bus panels.** The buffer is shared,
+   but the `u8g2_t` struct behind each object is not — it costs roughly 490
+   bytes apiece. Three of them is about 1.5 KB on its own. OLED 2 and OLED 3
+   therefore share a single object, re-pointed at the other pin pair for each
+   refresh (`selectSoftPanel`).
+
+A second saving: the serial JSON is written out with `Serial.print` instead of
+ArduinoJson, which removes a JSON document and a library dependency.
+
+**If you add a fourth display, expect to run out of RAM again.** The next lever
+would be driving all three panels through the software bus so that a single
+object covers every panel — but that is slower, and it was not needed here.
+
+If your panels are 128x32 rather than 128x64, change `128X64` to `128X32` in
+both constructors.
 
 > **OLED 1 on 3.3 V:** the Uno's `A4`/`A5` lines idle at 5 V, so the panel sees
 > 5 V logic even when powered from 3.3 V. Most breakouts tolerate that. If OLED 1
@@ -211,8 +237,8 @@ change `128X64` to `128X32` in the three constructor lines.
 ### Reading the Arduino's own errors
 
 The sketch reports problems it can see — a display that did not answer, an
-unknown command, telemetry that did not fit its JSON buffer — as
-`device/log` lines. The gateway prints them into the service journal:
+unknown command, a malformed command line — as `device/log` lines. The gateway
+prints them into the service journal:
 
 ```bash
 journalctl -u cybersentinel-gateway -f | grep '\[arduino'
