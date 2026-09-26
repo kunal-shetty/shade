@@ -18,7 +18,11 @@
     ],
     "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.cybersentinel.rover"
+      "bundleIdentifier": "com.cybersentinel.rover",
+      "infoPlist": {
+        "NSSpeechRecognitionUsageDescription": "Allow CyberSentinel to transcribe your voice commands.",
+        "NSMicrophoneUsageDescription": "Allow CyberSentinel to listen for rover voice commands."
+      }
     },
     "android": {
       "package": "com.cybersentinel.rover",
@@ -28,10 +32,18 @@
         "backgroundImage": "./assets/android-icon-background.png",
         "monochromeImage": "./assets/android-icon-monochrome.png"
       },
-      "predictiveBackGestureEnabled": false
+      "predictiveBackGestureEnabled": false,
+      "permissions": [
+        "android.permission.RECORD_AUDIO"
+      ]
     },
     "web": {
       "favicon": "./assets/favicon.png"
+    },
+    "extra": {
+      "eas": {
+        "projectId": "569d9bdb-efcf-43c5-aa98-bbb5d2256cd1"
+      }
     }
   }
 }
