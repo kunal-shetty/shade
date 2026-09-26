@@ -38,7 +38,7 @@ apt-get install -y python3-venv python3-pip \
   mosquitto mosquitto-clients \
   avahi-daemon libnss-mdns \
   espeak-ng alsa-utils \
-  ffmpeg || die "apt-get install failed"
+  ffmpeg v4l-utils || die "apt-get install failed"
 
 # ---------------------------------------------------------------------------
 # mDNS hostname
