@@ -95,6 +95,10 @@ class Config:
 
 CFG = Config()
 
+# Bumped whenever the deployed behaviour changes, so `/health` and setup.sh can
+# prove which gateway build is actually running on the Pi.
+GATEWAY_VERSION = "1.1.0"
+
 
 # ---------------------------------------------------------------------------
 # SPEAKER — text-to-speech on the Pi's speaker
@@ -778,6 +782,7 @@ async def lifespan(_app: FastAPI):
         asyncio.create_task(read_arduino_serial()),
         asyncio.create_task(publish_health_loop()),
     ]
+    print(f"[api] CyberSentinel gateway v{GATEWAY_VERSION}")
     print(f"[api] REST on :{CFG.api_port}  •  discovery name: {CFG.hostname}.local")
     print(f"[api] camera: {CAMERA.status()['detail']}")
     try:
@@ -834,6 +839,7 @@ async def health():
     return {
         "status": "online",
         "service": "cybersentinel",
+        "version": GATEWAY_VERSION,
         **devices,
         "devices": devices,
         "camera_info": CAMERA.status(),
