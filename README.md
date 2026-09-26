@@ -41,7 +41,7 @@ src/
 |------|---------|-------|
 | Rover commands + speaker | `ws://<pi>:8765` | MOVE at 100 ms pacing, STOP, patrol, buzzer, `SPEAK` |
 | Sensor events | `ws://<pi>:9001` (MQTT) | Subscribes to all `rover/* sensor/* threat/* camera/* rfid/* incident/* device/health` topics |
-| Camera stream | `http://<pi>:8080/stream.mjpg` | MJPEG, rendered in-app |
+| Camera stream | `http://<pi>:8080/stream.mjpg` | MJPEG, served by the gateway (ffmpeg), rendered in-app |
 | REST API | `http://<pi>:8000` | Incidents, alarm, camera, health, speak, FCM registration |
 
 All values are configurable in Settings and persisted via AsyncStorage.
@@ -59,6 +59,15 @@ launch (and whenever the network changes) the app resolves the Pi in order:
 The address is then saved and the MQTT/WebSocket links connect automatically.
 Toggle this in **Settings → Auto-discover on WiFi** or force it with
 **Find Pi on this WiFi**.
+
+## Camera
+
+The gateway owns the MJPEG feed: `ffmpeg` serves `http://<pi>:8080/stream.mjpg`
+and the gateway supervises/restarts it, so there is no separate camera service.
+The app shows a live **online/offline** state (from MQTT `device/health` *and* a
+15 s `GET /health` poll, so it works even without a WebSocket-capable broker),
+renders detection boxes over the feed, and supports reload, rotate, zoom,
+15 s recording (`/camera/record`) and night mode (`/camera/nightmode`).
 
 ## Voice control (mic → JEV → rover)
 
