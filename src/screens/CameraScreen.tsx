@@ -21,6 +21,7 @@ export const CameraScreen = () => {
   const [nightMode, setNightMode] = useState(false);
   const [flipped, setFlipped] = useState(false);
   const [zoom, setZoom] = useState(1);
+  const [reloadToken, setReloadToken] = useState(0);
   const [toast, setToast] = useState<string | null>(null);
 
   const showToast = (m: string) => {
@@ -38,22 +39,49 @@ export const CameraScreen = () => {
 
   const handleRecord = () =>
     requireAdmin(() => {
-      if (!connection.demoMode) api.cameraRecord().catch(() => showToast('Record failed'));
-      showToast('Recording 15 s clip…');
+      if (connection.demoMode) {
+        showToast('Demo stream — recording simulated');
+        return;
+      }
+      api
+        .cameraRecord(15)
+        .then((res) => showToast(res.path ? `Saved ${res.path.split('/').pop()}` : 'Recording started'))
+        .catch((err: Error) => showToast('Record failed: ' + err.message));
     });
 
   const handleNightMode = () =>
     requireAdmin(() => {
-      setNightMode((v) => !v);
-      if (!connection.demoMode) api.cameraNightMode().catch(() => showToast('Night mode failed'));
-      showToast('Night mode ' + (nightMode ? 'off' : 'on'));
+      const next = !nightMode;
+      setNightMode(next);
+      if (connection.demoMode) {
+        showToast('Night mode ' + (next ? 'on' : 'off'));
+        return;
+      }
+      api
+        .cameraNightMode(next)
+        .then((res) => {
+          const actual = res.night_mode ?? next;
+          setNightMode(actual);
+          showToast('Night mode ' + (actual ? 'on' : 'off'));
+        })
+        .catch((err: Error) => {
+          setNightMode(!next);
+          showToast('Night mode failed: ' + err.message);
+        });
     });
 
   const handleScreenshot = () => {
-    showToast('Frame captured to gallery');
-    if (!connection.demoMode) {
-      Linking.openURL(getStreamUri()).catch(() => undefined);
+    if (connection.demoMode) {
+      showToast('Demo stream — nothing to capture');
+      return;
     }
+    Linking.openURL(getStreamUri()).catch(() => showToast('Could not open the stream'));
+    showToast('Opened the stream in your browser');
+  };
+
+  const handleRefresh = () => {
+    setReloadToken((t) => t + 1);
+    showToast(cameraOnline ? 'Stream reloaded' : 'Reconnecting to the camera…');
   };
 
   return (
@@ -73,7 +101,10 @@ export const CameraScreen = () => {
         </View>
 
         <View style={[styles.streamHolder, flipped && { transform: [{ rotate: '180deg' }] }]}>
-          <StreamView height={280} />
+          {/* Container is clipped by streamHolder, so scaling zooms the feed. */}
+          <View style={{ transform: [{ scale: zoom }] }}>
+            <StreamView height={280} reloadToken={reloadToken} />
+          </View>
         </View>
 
         <View style={styles.metaRow}>
@@ -86,8 +117,14 @@ export const CameraScreen = () => {
             <Text style={[typography.caption, { color: c.textMuted }]}> 640×480 MJPEG</Text>
           </View>
           <View style={styles.metaItem}>
-            <Ionicons name={cameraOnline ? 'checkmark-circle' : 'help-circle'} size={13} color={cameraOnline ? palette.threatLow : c.textMuted} />
-            <Text style={[typography.caption, { color: c.textMuted }]}> {cameraOnline ? 'online' : 'unknown'}</Text>
+            <Ionicons
+              name={cameraOnline ? 'checkmark-circle' : 'alert-circle'}
+              size={13}
+              color={cameraOnline ? palette.threatLow : palette.threatMedium}
+            />
+            <Text style={[typography.caption, { color: cameraOnline ? c.textMuted : palette.threatMedium }]}>
+              {' '}{cameraOnline ? 'online' : 'offline'}
+            </Text>
           </View>
         </View>
 
@@ -113,7 +150,7 @@ export const CameraScreen = () => {
           <View style={styles.cell}><GhostButton icon="camera" label="Screenshot" onPress={handleScreenshot} /></View>
           <View style={styles.cell}><GhostButton icon="radio-button-on" label="Record 15 s" onPress={handleRecord} disabled={!isAdmin} /></View>
           <View style={styles.cell}><GhostButton icon={nightMode ? 'moon' : 'sunny'} label={nightMode ? 'Night ON' : 'Night OFF'} onPress={handleNightMode} disabled={!isAdmin} /></View>
-          <View style={styles.cell}><GhostButton icon="refresh" label="Refresh" onPress={() => showToast('Stream refreshed')} /></View>
+          <View style={styles.cell}><GhostButton icon="refresh" label="Refresh" onPress={handleRefresh} /></View>
         </View>
 
         <Card>
