@@ -148,11 +148,54 @@ curl -s http://127.0.0.1:8000/health | python3 -m json.tool | grep -A3 '"serial"
 The Arduino drives the motors from `FORWARD` / `BACKWARD` / `LEFT` / `RIGHT` /
 `STOP` / `BUZZER` lines and reports the reed switch on `sensor/door`.
 
+### OLED status displays
+
+Three SSD1306 panels are driven directly from the Uno:
+
+| Display | Power | Wiring | Bus |
+|---------|-------|--------|-----|
+| OLED 1 | 3.3 V | `A4` = SDA, `A5` = SCL | hardware I2C |
+| OLED 2 | 5 V | `D4` = SDA, `D5` = SCL | software I2C |
+| OLED 3 | 5 V | `D6` = SDA, `D7` = SCL | software I2C |
+
+Install the **U8g2** library (Library Manager → "U8g2" by Oliver Kraus) as well
+as **ArduinoJson**. Both are required — the sketch will not compile without them.
+
+What each panel shows:
+
+* **OLED 1** — rover state (`IDLE` / `FORWARD` / …), command count, uptime, error count
+* **OLED 2** — door open/closed, the raw reed reading, and whether OLED 2/3 initialised
+* **OLED 3** — last command, error count, and the last error text
+
+The sketch uses U8g2's *page-buffered* drivers (`..._128X64_NONAME_1_...`). A
+full-frame buffer is 1 KB and three of them would overflow the Uno's 2 KB of
+SRAM, so do not switch these to the `_F_` variants. If your panels are 128x32,
+change `128X64` to `128X32` in the three constructor lines.
+
+> **OLED 1 on 3.3 V:** the Uno's `A4`/`A5` lines idle at 5 V, so the panel sees
+> 5 V logic even when powered from 3.3 V. Most breakouts tolerate that. If OLED 1
+> stays blank while 2 and 3 work, power it from 5 V too or add a level shifter.
+
+### Reading the Arduino's own errors
+
+The sketch reports problems it can see — a display that did not answer, an
+unknown command, telemetry that did not fit its JSON buffer — as
+`device/log` lines. The gateway prints them into the service journal:
+
+```bash
+journalctl -u cybersentinel-gateway -f | grep '\[arduino'
+# [arduino/error] OLED2 (D4/D5) not detected
+# [arduino/info] arduino ready, oleds 1-3
+```
+
+At boot the sketch also scans the hardware I2C bus and logs every address that
+answered, which separates "wrong wiring" from "wrong I2C address".
+
 ### Known gaps
 
-The Arduino firmware only publishes `sensor/door` and `device/health`. The
-`pir_node` and `gas_node` tiles have no publisher, so they stay offline until
-`sensor/pir` and `sensor/gas` are emitted from `arduino.cpp`.
+The Arduino firmware only publishes `sensor/door`, `device/health` and
+`device/log`. The `pir_node` and `gas_node` tiles have no publisher, so they stay
+online only if something else emits `sensor/pir` and `sensor/gas`.
 
 ## 4. Camera
 
@@ -181,15 +224,33 @@ Set `CS_CAMERA_SOURCE` in `/opt/cybersentinel/gateway.env`, then
 
 #### CSI Camera Module (Picamera2)
 
-This is the usual Raspberry Pi setup. `setup.sh` installs `python3-picamera2`
-and builds the venv with `--system-site-packages` (picamera2 is an apt package,
-so a normal venv cannot import it). The gateway drives it through Picamera2's
-own MJPEG encoder — no OpenCV needed.
+This is the usual Raspberry Pi setup, with the module on the **ribbon cable**.
+`setup.sh` installs `python3-picamera2`, enables `camera_auto_detect`, and builds
+the venv with `--system-site-packages` (picamera2 is an apt package, so a normal
+venv cannot import it). The gateway drives it through Picamera2's own MJPEG
+encoder — no OpenCV needed.
 
 ```bash
-rpicam-hello -t 2000          # does the sensor work at all?
-curl -s http://cybersentinel.local:8000/camera/status | grep -o '"source":"[^"]*"'
+# 1. Does the sensor work at all, below our code? Must list a camera.
+rpicam-hello --list-cameras
+rpicam-hello -t 2000
+
+# 2. Does the venv see it? Must print a non-zero count.
+/opt/cybersentinel/venv/bin/python -c \
+  'from picamera2 import Picamera2; print(Picamera2.global_camera_info())'
+
+# 3. What does the gateway think?
+curl -s http://cybersentinel.local:8000/camera/status | python3 -m json.tool
 ```
+
+If step 1 finds nothing, it is not a gateway problem — check that
+`camera_auto_detect=1` is set in `/boot/firmware/config.txt` (older Raspberry Pi
+OS: `/boot/config.txt`), that the ribbon is seated in the `CAM/DISP 0` port with
+the metal contacts facing the board, and then reboot.
+
+`GET /health` carries a `camera_info` block with the resolved source, port and a
+plain-English `detail` string, so you can tell "no sensor" from "port already in
+use" without guessing.
 
 #### Already running your own camera server
 
