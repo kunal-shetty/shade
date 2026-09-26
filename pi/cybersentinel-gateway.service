@@ -1,0 +1,16 @@
+[Unit]
+Description=CyberSentinel Rover Gateway
+After=network-online.target mosquitto.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/cybersentinel
+EnvironmentFile=-/opt/cybersentinel/gateway.env
+ExecStart=/opt/cybersentinel/venv/bin/python /opt/cybersentinel/gateway.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
