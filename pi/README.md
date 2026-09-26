@@ -79,6 +79,27 @@ The gateway auto-detects `piper` → `espeak-ng` → `espeak` → `spd-say`. For
 with `CS_TTS_ENGINE` in `/opt/cybersentinel/gateway.env`, then
 `sudo systemctl restart cybersentinel-gateway`.
 
+### Making it sound friendlier
+
+The default voice is deliberately light and cheerful:
+
+```bash
+CS_TTS_VOICE=en+f3    # base language + espeak variant; f1..f5 = female, m1..m7 = male
+CS_TTS_PITCH=70       # 0-99: ~50 neutral, ~70 cheerful, ~85 cartoonish
+CS_TTS_RATE=165       # words per minute
+```
+
+If the variant is unknown to your espeak build the gateway logs a note and falls
+back to the plain language rather than going silent. Check what it settled on:
+
+```bash
+curl -s http://cybersentinel.local:8000/health | grep -o '"speaker":[^,]*'
+curl -s http://cybersentinel.local:8000/voice/status
+```
+
+The on-screen wording is cheerful too, and replies rotate between a few
+phrasings so repeated commands don't sound identical.
+
 For a much more natural voice, install [piper](https://github.com/rhasspy/piper)
 and point `CS_PIPER_MODEL` at a `.onnx` voice model.
 
