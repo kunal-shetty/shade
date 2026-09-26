@@ -81,7 +81,8 @@ with `CS_TTS_ENGINE` in `/opt/cybersentinel/gateway.env`, then
 
 ### Making it sound friendlier
 
-The default voice is deliberately light and cheerful:
+The default voice is deliberately light, cheerful and **female** — espeak's bare
+language codes (`en`) select its male voice, so the `+f*` variant matters:
 
 ```bash
 CS_TTS_VOICE=en+f3    # base language + espeak variant; f1..f5 = female, m1..m7 = male
@@ -89,8 +90,10 @@ CS_TTS_PITCH=70       # 0-99: ~50 neutral, ~70 cheerful, ~85 cartoonish
 CS_TTS_RATE=165       # words per minute
 ```
 
-If the variant is unknown to your espeak build the gateway logs a note and falls
-back to the plain language rather than going silent. Check what it settled on:
+If your espeak build does not have the variant you asked for, the gateway tries
+`en+f3`, `en+f4`, `en+f2`, `en-us+f3` and `en+f1` in turn, and only then drops to
+the base language (logging that it may sound male). Speaking at all still beats
+going silent. Check what it settled on:
 
 ```bash
 curl -s http://cybersentinel.local:8000/health | grep -o '"speaker":[^,]*'
@@ -101,7 +104,10 @@ The on-screen wording is cheerful too, and replies rotate between a few
 phrasings so repeated commands don't sound identical.
 
 For a much more natural voice, install [piper](https://github.com/rhasspy/piper)
-and point `CS_PIPER_MODEL` at a `.onnx` voice model.
+and point `CS_PIPER_MODEL` at a `.onnx` voice model. Piper's neural voices are
+far less robotic than espeak, and it takes precedence over espeak when both are
+present. Female models worth trying: `en_US-lessac-medium`,
+`en_US-amy-medium`, `en_GB-jenny_dioco-medium`.
 
 The app sends replies over the existing WebSocket as `{ "cmd": "SPEAK", "text": "…" }`,
 so no extra ports are needed. You can also test it directly:
