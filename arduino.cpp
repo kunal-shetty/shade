@@ -14,6 +14,9 @@ const int in4 = 11;
 // Door Sensor
 const int REED_PIN = 2;
 
+// Buzzer / horn (change to match your wiring)
+const int BUZZER_PIN = 12;
+
 void setup() {
   // Set baud rate to 115200 to match the Raspberry Pi gateway.py
   Serial.begin(115200);
@@ -26,6 +29,10 @@ void setup() {
 
   // Setup Sensor Pin
   pinMode(REED_PIN, INPUT_PULLUP);
+
+  // Setup Buzzer
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
 
   stopMotors();
 }
@@ -41,6 +48,11 @@ void loop() {
     else if (command == "LEFT") moveLeft();
     else if (command == "RIGHT") moveRight();
     else if (command == "STOP") stopMotors();
+    else if (command == "BUZZER") {
+      tone(BUZZER_PIN, 1200, 500); // 1.2 kHz for 500 ms
+      delay(520);
+      noTone(BUZZER_PIN);
+    }
   }
 
   // 2. Send Sensor Data to Pi (Every 2 seconds)
