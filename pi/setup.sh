@@ -198,8 +198,20 @@ sleep 2
 HEALTH="$(curl -fsS --max-time 6 "http://127.0.0.1:${API_PORT}/health" 2>/dev/null || true)"
 if [[ -z "${HEALTH}" ]]; then
   warn "No answer from http://127.0.0.1:${API_PORT}/health"
+  warn "Port ${API_PORT} owner:"
+  ss -ltnp 2>/dev/null | grep ":${API_PORT}" >&2 || warn "  (nothing is listening on that port)"
   warn "Inspect: journalctl -u cybersentinel-gateway -n 40 --no-pager"
 else
+  # The most common cause of a "stale" reading is an older gateway that was
+  # started by hand (not by systemd) still holding the port, so the service's
+  # restart could never bind and the old code kept answering.
+  if [[ "${HEALTH}" != *'"version"'* ]]; then
+    warn "The gateway answering on :${API_PORT} has no version field — it is an older build."
+    warn "Port ${API_PORT} owner:"
+    ss -ltnp 2>/dev/null | grep ":${API_PORT}" >&2 || warn "  (unknown)"
+    warn "If that process was started by hand (e.g. 'python3 gateway.py'), kill it and re-run:"
+    warn "  sudo systemctl restart cybersentinel-gateway"
+  fi
   # ASCII only: a C/POSIX locale makes Python's stdout non-UTF-8, and printing
   # box-drawing or check characters there raises UnicodeEncodeError.
   HEALTH="${HEALTH}" PYTHONIOENCODING=utf-8 python3 - <<'PY'
