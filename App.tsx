@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { StatusBar, useColorScheme, View } from 'react-native';
 import { SafeAreaProvider } from 'react-native-safe-area-context';
 import { RootNavigator } from './src/navigation/RootNavigator';
@@ -7,20 +7,25 @@ import { ConnectionBanner } from './src/components/ui';
 import { getThemeColors, ThemeContext } from './src/theme/theme';
 import { useSettings } from './src/store/settings';
 import { useLiveData } from './src/store/rover';
+import { useDiscovery } from './src/store/discovery';
 import { connectMqtt, disconnectMqtt } from './src/services/mqtt';
 import { connectRoverLink, disconnectRoverLink } from './src/services/roverLink';
 import { startDemoEngine, stopDemoEngine } from './src/services/demoEngine';
 import { registerPushToken } from './src/services/notifications';
+import { startAutoDiscovery } from './src/services/discovery';
+import { initVoice } from './src/services/voice';
 
 export default function App() {
   const scheme = useColorScheme();
   const darkMode = useSettings((s) => s.prefs.darkMode);
   const demoMode = useSettings((s) => s.connection.demoMode);
   const mqttState = useLiveData((s) => s.mqttState);
+  const discoveryStage = useDiscovery((s) => s.stage);
   const dark = darkMode === 'dark' || (darkMode === 'system' && scheme === 'dark');
   const colors = getThemeColors(dark);
 
   const [servicesReady, setServicesReady] = useState(false);
+  const stopDiscoveryRef = useRef<(() => void) | null>(null);
 
   useEffect(() => {
     // connect after settings rehydrate from AsyncStorage
@@ -28,16 +33,39 @@ export default function App() {
     return () => clearTimeout(t);
   }, []);
 
+  // Speech recognition is independent of the rover link, so initialise it once.
+  useEffect(() => {
+    void initVoice();
+  }, []);
+
   useEffect(() => {
     if (!servicesReady) return;
+
     if (demoMode) {
       startDemoEngine();
     } else {
+      // Connect with the last-known host immediately, then let discovery
+      // correct the address as soon as it finds the Pi on this WiFi.
       connectMqtt();
       connectRoverLink();
+      void registerPushToken();
+
+      let cancelled = false;
+      void startAutoDiscovery(() => {
+        if (cancelled) return;
+        disconnectMqtt();
+        disconnectRoverLink();
+        connectMqtt();
+        connectRoverLink();
+      }).then((stop) => {
+        if (cancelled) stop();
+        else stopDiscoveryRef.current = stop;
+      });
     }
-    if (!demoMode) void registerPushToken();
+
     return () => {
+      stopDiscoveryRef.current?.();
+      stopDiscoveryRef.current = null;
       stopDemoEngine();
       disconnectMqtt();
       disconnectRoverLink();
@@ -45,13 +73,23 @@ export default function App() {
   }, [servicesReady, demoMode]);
 
   const bannerState = demoMode ? 'demo' : mqttState;
+  const bannerLabel =
+    discoveryStage === 'searching' ? 'Searching for the rover on this WiFi…' : undefined;
 
   return (
     <SafeAreaProvider>
       <ThemeContext.Provider value={colors}>
         <StatusBar barStyle={dark ? 'light-content' : 'dark-content'} />
         <View style={{ flex: 1, backgroundColor: colors.background }}>
-          <ConnectionBanner state={bannerState} onRetry={() => { disconnectMqtt(); connectMqtt(); }} />
+          <ConnectionBanner
+            state={bannerState}
+            label={bannerLabel}
+            onRetry={() => {
+              disconnectMqtt();
+              connectMqtt();
+              connectRoverLink();
+            }}
+          />
           <RootNavigator />
         </View>
         <RfidModal />
