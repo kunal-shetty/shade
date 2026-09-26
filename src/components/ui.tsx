@@ -119,9 +119,18 @@ export const IncidentRow = ({ incident, onPress }: { incident: Incident; onPress
 };
 
 // ---------- ConnectionBanner ----------
-export const ConnectionBanner = ({ state, onRetry }: { state: 'connected' | 'reconnecting' | 'offline' | 'demo'; onRetry: () => void }) => {
+export const ConnectionBanner = ({
+  state,
+  onRetry,
+  label: labelOverride,
+}: {
+  state: 'connected' | 'reconnecting' | 'offline' | 'demo';
+  onRetry: () => void;
+  label?: string;
+}) => {
   if (state === 'connected' || state === 'demo') return null;
-  const label = state === 'reconnecting' ? 'Reconnecting to rover…' : 'Rover network offline';
+  const label =
+    labelOverride ?? (state === 'reconnecting' ? 'Reconnecting to rover…' : 'Rover network offline');
   const colors: [string, string] = state === 'reconnecting' ? [palette.threatMedium, '#B45309'] : [palette.threatCritical, '#991B1B'];
   return (
     <LinearGradient colors={colors} start={{ x: 0, y: 0 }} end={{ x: 1, y: 0 }}>
