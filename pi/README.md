@@ -124,12 +124,35 @@ USB. The gateway reconnects to the serial port automatically, so replugging the
 Arduino does not require a restart.
 
 ```bash
-ls /dev/ttyUSB* /dev/ttyACM*          # find the port
-# set CS_SERIAL_PORT in /opt/cybersentinel/gateway.env if it is not /dev/ttyUSB0
+ls /dev/ttyUSB* /dev/ttyACM*          # see what is attached
+```
+
+`CS_SERIAL_PORT` defaults to `auto`, which probes `/dev/ttyACM*` first (a
+genuine Uno R3 uses the CDC-ACM driver and shows up as `/dev/ttyACM0`) and then
+`/dev/ttyUSB*` (CH340/CP2102 clones). You only need to set it if you want to
+pin one specific device:
+
+```bash
+# CS_SERIAL_PORT=/dev/ttyACM0   # in /opt/cybersentinel/gateway.env
+```
+
+The service user must be in the `dialout` group to open either node — `setup.sh`
+adds the login user automatically. If the app still shows the Arduino offline,
+check `GET /health`: its `serial` block names the port the gateway tried and the
+exact error (`permission denied`, `device busy`, …).
+
+```bash
+curl -s http://127.0.0.1:8000/health | python3 -m json.tool | grep -A3 '"serial"'
 ```
 
 The Arduino drives the motors from `FORWARD` / `BACKWARD` / `LEFT` / `RIGHT` /
 `STOP` / `BUZZER` lines and reports the reed switch on `sensor/door`.
+
+### Known gaps
+
+The Arduino firmware only publishes `sensor/door` and `device/health`. The
+`pir_node` and `gas_node` tiles have no publisher, so they stay offline until
+`sensor/pir` and `sensor/gas` are emitted from `arduino.cpp`.
 
 ## 4. Camera
 
