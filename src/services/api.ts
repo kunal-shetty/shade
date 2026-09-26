@@ -91,8 +91,25 @@ export const api = {
   roverStatus: () => request<RoverStatus>('/rover/status'),
   triggerAlarm: () => request<{ ok: boolean }>('/alarm/trigger', { method: 'POST' }),
   resetAlarm: () => request<{ ok: boolean }>('/alarm/reset', { method: 'POST' }),
-  cameraRecord: () => request<{ ok: boolean }>('/camera/record', { method: 'POST' }),
-  cameraNightMode: () => request<{ ok: boolean }>('/camera/nightmode', { method: 'POST' }),
+  cameraRecord: (seconds = 15) =>
+    request<{ ok: boolean; path?: string; seconds?: number }>('/camera/record', {
+      method: 'POST',
+      body: JSON.stringify({ seconds }),
+    }),
+  cameraNightMode: (on?: boolean) =>
+    request<{ ok: boolean; night_mode?: boolean; hardware_control?: string | null }>('/camera/nightmode', {
+      method: 'POST',
+      body: JSON.stringify(on == null ? {} : { on }),
+    }),
+  cameraStatus: () =>
+    request<{
+      online: boolean;
+      detail: string;
+      stream_url: string;
+      night_mode: boolean;
+      recording: boolean;
+      device_present: boolean;
+    }>('/camera/status'),
   deviceHealth: () => request<MqttDeviceHealth>('/health'),
   fcmRegister: (token: string) =>
     request<{ ok: boolean }>('/fcm/register', { method: 'POST', body: JSON.stringify({ token }) }),
