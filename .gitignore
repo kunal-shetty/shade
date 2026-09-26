@@ -42,3 +42,6 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# arduino-cli build output (pi/flash-arduino.sh)
+.arduino-build/
