@@ -148,6 +148,38 @@ curl -s http://127.0.0.1:8000/health | python3 -m json.tool | grep -A3 '"serial"
 The Arduino drives the motors from `FORWARD` / `BACKWARD` / `LEFT` / `RIGHT` /
 `STOP` / `BUZZER` lines and reports the reed switch on `sensor/door`.
 
+### Flashing the sketch from the Pi
+
+You do **not** need a second computer with the Arduino IDE — the Pi and the
+Arduino already share a USB cable, so `arduino-cli` on the Pi can compile and
+upload over it:
+
+```bash
+cd ~/cybersentinel
+sudo bash pi/flash-arduino.sh              # auto-detects /dev/ttyACM0
+sudo bash pi/flash-arduino.sh /dev/ttyACM0 # or name the port yourself
+```
+
+The script installs `arduino-cli` (apt, falling back to Arduino's installer),
+adds the `arduino:avr` core and the `U8g2` + `ArduinoJson` libraries, then
+compiles and uploads.
+
+> **It stops the gateway first.** The running service holds `/dev/ttyACM0`
+> open, and an upload against a held port fails with *resource busy*. The
+> script stops the service, flashes, and starts it again — including if the
+> upload fails — so you never have to remember that.
+
+It finishes by checking the journal for the sketch's own boot line, which is
+how you know the flash actually took:
+
+```
+==> The new firmware reported in:
+      [arduino/info] arduino ready, oleds 123
+```
+
+If the OLEDs are dark but that line reports a panel as missing, it is a wiring
+problem and the sketch has already told you which one.
+
 ### OLED status displays
 
 Three SSD1306 panels are driven directly from the Uno:
