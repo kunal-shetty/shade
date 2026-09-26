@@ -18,6 +18,7 @@ INSTALL_DIR="/opt/cybersentinel"
 RUN_USER="${SUDO_USER:-pi}"
 HOSTNAME_TARGET="cybersentinel"
 MOSQ_WS_CHECK_PORT=19001
+CAMERA_NEEDS_REBOOT=0
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
@@ -46,6 +47,62 @@ apt-get install -y python3-venv python3-pip \
 apt-get install -y rpicam-apps >/dev/null 2>&1 \
   || apt-get install -y libcamera-apps >/dev/null 2>&1 \
   || warn "No libcamera CLI installed (optional)"
+
+# ---------------------------------------------------------------------------
+# CSI camera (ribbon cable → Picamera2)
+#
+# The Camera Module is driven by Picamera2, which is an apt package
+# (python3-picamera2) and not a pip one. The venv below is created with
+# --system-site-packages for exactly this reason.
+#
+# The usual reason a perfectly good module is invisible is that auto-detection
+# is switched off in the boot config. No amount of Python can work around that,
+# so it is checked and repaired here.
+# ---------------------------------------------------------------------------
+log "Checking CSI camera boot configuration"
+CONFIG_TXT=""
+for candidate in /boot/firmware/config.txt /boot/config.txt; do
+  if [[ -f "${candidate}" ]]; then
+    CONFIG_TXT="${candidate}"
+    break
+  fi
+done
+
+if [[ -z "${CONFIG_TXT}" ]]; then
+  warn "No /boot/firmware/config.txt or /boot/config.txt - cannot check camera settings."
+else
+  if grep -qE '^[[:space:]]*camera_auto_detect=0' "${CONFIG_TXT}"; then
+    warn "camera_auto_detect=0 in ${CONFIG_TXT} — the CSI camera will never appear."
+    warn "Change it to 1 (or delete the line) and reboot."
+  elif grep -qE '^[[:space:]]*camera_auto_detect=' "${CONFIG_TXT}"; then
+    log "camera_auto_detect already enabled in ${CONFIG_TXT}"
+  else
+    log "Adding camera_auto_detect=1 to ${CONFIG_TXT}"
+    printf '\n# CyberSentinel: let the firmware detect the attached CSI camera.\ncamera_auto_detect=1\n' >> "${CONFIG_TXT}"
+    CAMERA_NEEDS_REBOOT=1
+  fi
+
+  # A hard-coded overlay for a *different* sensor is a classic silent failure.
+  if grep -qE '^[[:space:]]*dtoverlay=(ov5647|imx219|imx477|imx708|imx290|imx519)' "${CONFIG_TXT}"; then
+    log "A fixed dtoverlay is set in ${CONFIG_TXT}; if your sensor is a different model, remove it."
+  fi
+fi
+
+# Ask the firmware what it can actually see, so a loose ribbon is caught now.
+CAM_BIN="$(command -v rpicam-hello || command -v libcamera-hello || true)"
+if [[ -n "${CAM_BIN}" ]]; then
+  CAM_LIST="$("${CAM_BIN}" --list-cameras 2>/dev/null || true)"
+  if [[ -n "${CAM_LIST}" ]] && grep -qi 'available cameras' <<<"${CAM_LIST}"; then
+    log "CSI camera reported by the firmware:"
+    grep -iA2 'available cameras' <<<"${CAM_LIST}" | sed 's/^/      /'
+  else
+    warn "The firmware lists no CSI camera."
+    warn "  * ribbon fully seated in CAM/DISP 0, metal contacts facing the board"
+    warn "  * reboot if camera_auto_detect was just changed"
+  fi
+else
+  warn "No rpicam-hello/libcamera-hello available — cannot probe the sensor."
+fi
 
 # ---------------------------------------------------------------------------
 # mDNS hostname
@@ -200,12 +257,20 @@ python3 -m venv --system-site-packages "${INSTALL_DIR}/venv" \
 "${INSTALL_DIR}/venv/bin/pip" install --upgrade pip || warn "pip upgrade failed"
 "${INSTALL_DIR}/venv/bin/pip" install -r "${REPO_DIR}/pi/requirements.txt" || die "pip install failed"
 
-# Fail loudly rather than silently losing the camera backend.
-if "${INSTALL_DIR}/venv/bin/python" -c "from picamera2 import Picamera2; print(len(Picamera2.global_camera_info()))" >/dev/null 2>&1; then
-  log "picamera2 importable from the venv (CSI camera available)"
+# Fail loudly rather than silently losing the camera backend. The distinction
+# matters: an import that works but finds zero sensors is a wiring problem, not
+# a Python one, and the two need completely different fixes.
+if PICAM_COUNT="$("${INSTALL_DIR}/venv/bin/python" \
+      -c 'from picamera2 import Picamera2 as P; print(len(P.global_camera_info()))' 2>&1)"; then
+  if [[ "${PICAM_COUNT}" == "0" ]]; then
+    warn "picamera2 imports from the venv but sees 0 CSI cameras."
+    warn "  Check the ribbon (CAM/DISP 0, contacts facing the board) and reboot."
+  else
+    log "picamera2 sees ${PICAM_COUNT} CSI camera(s) from the venv"
+  fi
 else
-  warn "picamera2 is not importable from the venv — the CSI camera will be reported offline."
-  warn "Install/enable it with: apt-get install -y python3-picamera2"
+  warn "picamera2 is not importable from the venv: ${PICAM_COUNT}"
+  warn "  apt-get install -y python3-picamera2   (then re-run this script)"
 fi
 
 chown -R "${RUN_USER}:${RUN_USER}" "${INSTALL_DIR}"
@@ -278,7 +343,13 @@ else:
     mark = "[ok]" if cam.get("online") else "[--]"
     print(f"    {mark} camera  : {'online' if cam.get('online') else 'offline'} "
           f"[{cam.get('source', '?')}] - {cam.get('detail')}")
-print(f"    [--] arduino : {data.get('arduino_door')}")
+serial = data.get("serial")
+if serial is None:
+    print("    [!!] arduino : no serial block - the deployed gateway.py is stale")
+else:
+    mark = "[ok]" if data.get("arduino_door") == "online" else "[--]"
+    detail = serial.get("error") or f"connected on {serial.get('port')}"
+    print(f"    {mark} arduino : {data.get('arduino_door')} - {detail}")
 PY
 fi
 
@@ -299,4 +370,13 @@ cat <<EOF
   Speaker check:
     speaker-test -t sine -f 440 -l 1
     espeak-ng "CyberSentinel online"
+
+  Arduino check:
+    curl -s http://127.0.0.1:${API_PORT}/health | grep -o '"serial":[^}]*}'
+    journalctl -u cybersentinel-gateway -f | grep '\[arduino'
 EOF
+
+if [[ "${CAMERA_NEEDS_REBOOT}" -eq 1 ]]; then
+  warn "camera_auto_detect was just enabled — reboot before the CSI camera will appear:"
+  warn "  sudo reboot"
+fi
