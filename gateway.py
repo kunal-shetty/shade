@@ -19,6 +19,7 @@ Env:  see CONFIG below (all optional).
 from __future__ import annotations
 
 import asyncio
+import glob
 import io
 import json
 import os
@@ -75,7 +76,9 @@ class Config:
     mqtt_port: int = int(os.getenv("CS_MQTT_PORT", "1883"))
     ws_port: int = int(os.getenv("CS_WS_PORT", "8765"))
     api_port: int = int(os.getenv("CS_API_PORT", "8000"))
-    serial_port: str = os.getenv("CS_SERIAL_PORT", "/dev/ttyUSB0")
+    # "auto" (the default) sniffs /dev/ttyACM* then /dev/ttyUSB*, so a genuine
+    # Uno R3 (CDC-ACM → ttyACM0) works without any configuration.
+    serial_port: str = os.getenv("CS_SERIAL_PORT", "auto")
     serial_baud: int = int(os.getenv("CS_SERIAL_BAUD", "115200"))
     tts_engine: str = os.getenv("CS_TTS_ENGINE", "auto")  # auto | espeak-ng | espeak | spd-say | none
     # espeak takes a base language plus an optional voice *variant*: "en+f3" is
@@ -110,7 +113,7 @@ CFG = Config()
 
 # Bumped whenever the deployed behaviour changes, so `/health` and setup.sh can
 # prove which gateway build is actually running on the Pi.
-GATEWAY_VERSION = "1.4.0"
+GATEWAY_VERSION = "1.5.0"
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +273,29 @@ SPEAKER = Speaker(CFG)
 # MOTOR / SERIAL
 # ---------------------------------------------------------------------------
 
+# A real Arduino Uno R3 uses the CDC-ACM driver and appears as /dev/ttyACM0.
+# Clones built around CH340/CP2102 chips appear as /dev/ttyUSB0. Probing both
+# keeps the rover plug-and-play instead of demanding a hand-edited config.
+SERIAL_PORT_PATTERNS = ("/dev/ttyACM*", "/dev/ttyUSB*")
+
+
+def discover_serial_port(configured: str = "") -> str | None:
+    """Return a serial port path that actually exists on this machine.
+
+    An explicit path is honoured while it is present. Otherwise, and whenever
+    that path has gone stale, the usual Arduino device globs are probed — ACM
+    first, because that is what a genuine Uno R3 enumerates as.
+    """
+    configured = (configured or "").strip()
+    if configured and configured.lower() != "auto" and os.path.exists(configured):
+        return configured
+    for pattern in SERIAL_PORT_PATTERNS:
+        matches = sorted(glob.glob(pattern))
+        if matches:
+            return matches[0]
+    return None
+
+
 class MotorBus:
     """Reads Arduino sensor lines and writes movement commands.
 
@@ -282,20 +308,32 @@ class MotorBus:
         self._ser = None
         self._lock = threading.Lock()
         self.connected = False
+        self.port: str | None = None
+        self.last_error: str | None = None
 
     @property
     def serial(self):
         if serial is None:
+            self.last_error = "pyserial is not installed"
             return None
         with self._lock:
             if self._ser is not None:
                 return self._ser
+            port = discover_serial_port(self.cfg.serial_port)
+            if port is None:
+                self.last_error = "no Arduino on /dev/ttyACM* or /dev/ttyUSB*"
+                print(f"[serial] {self.last_error}")
+                return None
             try:
-                self._ser = serial.Serial(self.cfg.serial_port, self.cfg.serial_baud, timeout=1)
+                self._ser = serial.Serial(port, self.cfg.serial_baud, timeout=1)
                 self.connected = True
-                print(f"[serial] connected on {self.cfg.serial_port}")
+                self.port = port
+                self.last_error = None
+                print(f"[serial] connected on {port}")
             except Exception as exc:
-                print(f"[serial] not available on {self.cfg.serial_port}: {exc}")
+                self.port = port
+                self.last_error = str(exc)
+                print(f"[serial] not available on {port}: {exc}")
                 self._ser = None
             return self._ser
 
@@ -1233,6 +1271,7 @@ async def health():
         "version": GATEWAY_VERSION,
         **devices,
         "devices": devices,
+        "serial": {"port": MOTORS.port, "error": MOTORS.last_error},
         "camera_info": CAMERA.status(),
         "pi": pi_stats(),
         "speaker": SPEAKER.describe(),
