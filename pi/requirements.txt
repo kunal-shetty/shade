@@ -1,0 +1,7 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+websockets>=13
+paho-mqtt>=2.1
+pyserial>=3.5
+zeroconf>=0.132
+psutil>=6.0
