@@ -113,7 +113,7 @@ CFG = Config()
 
 # Bumped whenever the deployed behaviour changes, so `/health` and setup.sh can
 # prove which gateway build is actually running on the Pi.
-GATEWAY_VERSION = "1.5.0"
+GATEWAY_VERSION = "1.6.0"
 
 
 # ---------------------------------------------------------------------------
@@ -469,10 +469,12 @@ class _MjpegRequestHandler(BaseHTTPRequestHandler):
                     self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n")
                     self.wfile.write(b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n")
                     self.wfile.write(frame + b"\r\n")
-            except (BrokenPipeError, ConnectionResetError, OSError):
-                pass
+            except (BrokenPipeError, ConnectionResetError, OSError) as exc:
+                # Expected whenever a viewer closes the stream.
+                print(f"[camera] stream viewer disconnected: {exc}")
             return
 
+        print(f"[camera] 404 for {path!r} (stream is {cfg.camera_stream_path})")
         self.send_error(404)
 
     def _send(self, code: int, content_type: str, body: bytes) -> None:
@@ -483,8 +485,9 @@ class _MjpegRequestHandler(BaseHTTPRequestHandler):
         self.end_headers()
         try:
             self.wfile.write(body)
-        except OSError:
-            pass
+        except OSError as exc:
+            # Normal when a browser tab navigates away mid-response.
+            print(f"[camera] client went away during a {code} response: {exc}")
 
 
 class _MjpegServer(ThreadingHTTPServer):
@@ -505,6 +508,7 @@ class CameraManager:
         self.cfg = cfg
         self.source = "none"
         self.reason = "disabled" if not cfg.camera_enable else "starting"
+        self._last_reason = ""
         self.night = False
         self._stop = threading.Event()
         self._frame: bytes | None = None
@@ -517,9 +521,21 @@ class CameraManager:
         self._log_path = Path(tempfile.gettempdir()) / "cybersentinel-camera.log"
         try:
             self.cfg.record_dir.mkdir(parents=True, exist_ok=True)
-        except Exception:
-            pass
+        except Exception as exc:
+            # Recording is about to fail for a reason nobody would guess.
+            print(f"[camera] cannot use record dir {self.cfg.record_dir}: {exc}")
         threading.Thread(target=self._supervise, name="camera", daemon=True).start()
+
+    def _note(self, reason: str) -> None:
+        """Record why the stream is down, printing only when it changes.
+
+        The supervisor retries every few seconds; without this the journal
+        would repeat the same line forever and bury the real errors.
+        """
+        self.reason = reason
+        if reason != self._last_reason:
+            self._last_reason = reason
+            print(f"[camera] {reason}")
 
     # ---- shared frame buffer -------------------------------------------
 
@@ -622,14 +638,14 @@ class CameraManager:
         while not self._stop.is_set():
             self.source = self._resolve_source()
             if self.source == "none":
-                self.reason = (
+                self._note(
                     "no camera found - install python3-picamera2 for the CSI camera "
                     f"or attach a USB camera at {self.cfg.camera_device}"
                 )
                 self._stop.wait(10)
                 continue
             if self.source == "external" and not self.cfg.camera_external_url:
-                self.reason = "CS_CAMERA_SOURCE=external needs CS_CAMERA_EXTERNAL_URL"
+                self._note("CS_CAMERA_SOURCE=external needs CS_CAMERA_EXTERNAL_URL")
                 self._stop.wait(10)
                 continue
             if not self._serve():
@@ -689,11 +705,11 @@ class CameraManager:
             while not self._stop.is_set() and self._frame_at == 0.0 and time.time() < deadline:
                 time.sleep(0.2)
             if self._frame_at == 0.0:
-                self.reason = "picamera produced no frames"
+                self._note("picamera started but produced no frames")
                 return
             while not self._stop.is_set():
                 if (time.time() - self._frame_at) > 6:
-                    self.reason = "picamera stream stalled"
+                    self._note("picamera stream stalled")
                     return
                 time.sleep(0.5)
         except Exception as exc:
@@ -711,10 +727,10 @@ class CameraManager:
     def _run_usb(self) -> None:
         """USB webcam through ffmpeg, piped to stdout and re-served by us."""
         if not shutil.which("ffmpeg"):
-            self.reason = "ffmpeg not installed (apt-get install ffmpeg)"
+            self._note("ffmpeg not installed (apt-get install ffmpeg)")
             return
         if not Path(self.cfg.camera_device).exists():
-            self.reason = f"{self.cfg.camera_device} not present"
+            self._note(f"{self.cfg.camera_device} not present")
             return
 
         cmd = [
@@ -736,18 +752,18 @@ class CameraManager:
                       f":{self.cfg.camera_port}{self.cfg.camera_stream_path}")
                 stdout = proc.stdout
                 if stdout is None:
-                    self.reason = "ffmpeg produced no output pipe"
+                    self._note("ffmpeg produced no output pipe")
                     return
                 for frame in iter_jpegs(stdout):
                     if self._stop.is_set():
                         return
                     self._on_frame(frame)
         except Exception as exc:
-            self.reason = f"ffmpeg failed: {exc}"
+            self._note(f"ffmpeg failed: {exc}")
         finally:
             self._kill_ffmpeg()
             if not self._stop.is_set() and not self.reason.startswith("ffmpeg failed"):
-                self.reason = read_tail(self._log_path) or "ffmpeg exited"
+                self._note(read_tail(self._log_path) or "ffmpeg exited")
 
     def _run_external(self) -> None:
         """Proxy an MJPEG stream you already run (e.g. your own Flask app)."""
@@ -770,8 +786,12 @@ class CameraManager:
             try:
                 proc.terminate()
                 proc.wait(timeout=3)
-            except Exception:
-                pass
+            except Exception as exc:
+                print(f"[camera] ffmpeg did not stop cleanly ({exc}); killing it")
+                try:
+                    proc.kill()
+                except Exception as kill_exc:
+                    print(f"[camera] could not kill ffmpeg: {kill_exc}")
 
     @staticmethod
     def _apply_picamera_night(cam, on: bool) -> None:
@@ -792,7 +812,9 @@ class CameraManager:
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
                 )
                 hardware = self.cfg.camera_night_ctrl
-            except Exception:
+            except Exception as exc:
+                # The software filter below still applies, so this is a warning.
+                print(f"[camera] hardware night control '{self.cfg.camera_night_ctrl}' failed: {exc}")
                 hardware = None
         if want != self.night:
             self.night = want
@@ -966,8 +988,9 @@ def mqtt_publish(topic: str, payload: dict) -> None:
         return
     try:
         MQTT.publish(topic, json.dumps(payload))
-    except Exception:
-        pass
+    except Exception as exc:
+        # Telemetry loss is easy to miss, so say which topic was dropped.
+        print(f"[mqtt] publish to '{topic}' failed: {exc}")
 
 
 def start_mqtt() -> None:
@@ -979,23 +1002,34 @@ def start_mqtt() -> None:
     def on_connect(_client, _userdata, _flags, reason, _props=None):
         print(f"[mqtt] connected ({reason}); subscribing")
         for topic in MQTT_TOPICS:
-            _client.subscribe(topic)
+            try:
+                _client.subscribe(topic)
+            except Exception as exc:
+                print(f"[mqtt] subscribe to '{topic}' failed: {exc}")
+
+    def on_disconnect(_client, _userdata, _flags=None, reason=None, _props=None):
+        print(f"[mqtt] disconnected ({reason}); paho will retry in the background")
 
     def on_message(_client, _userdata, msg):
         try:
             payload = json.loads(msg.payload.decode())
-        except Exception:
+        except Exception as exc:
+            print(f"[mqtt] ignoring malformed payload on '{msg.topic}': {exc}")
             return
-        if msg.topic == "device/health":
-            STATE.device_health.update(payload)
-        elif msg.topic == "rover/status":
-            STATE.rover_status = payload
-        else:
-            STATE.latest_sensors[msg.topic] = payload
+        try:
+            if msg.topic == "device/health":
+                STATE.device_health.update(payload)
+            elif msg.topic == "rover/status":
+                STATE.rover_status = payload
+            else:
+                STATE.latest_sensors[msg.topic] = payload
+        except Exception as exc:
+            print(f"[mqtt] could not apply '{msg.topic}': {exc}")
 
     try:
         client = mqtt_client.Client(mqtt_client.CallbackAPIVersion.VERSION2, client_id="cybersentinel-gateway")
         client.on_connect = on_connect
+        client.on_disconnect = on_disconnect
         client.on_message = on_message
         client.connect(CFG.mqtt_broker, CFG.mqtt_port, keepalive=30)
         client.loop_start()
@@ -1010,7 +1044,13 @@ def start_mqtt() -> None:
 # ---------------------------------------------------------------------------
 
 async def read_arduino_serial() -> None:
-    """Forward JSON lines from the Arduino into MQTT + local state."""
+    """Forward JSON lines from the Arduino into MQTT + local state.
+
+    The firmware emits a `device/log` topic for anything it considers worth
+    reporting (missing OLED, unknown command, bad telemetry), and those lines
+    are printed here so `journalctl -u cybersentinel-gateway` shows the board's
+    own view of what went wrong.
+    """
     while True:
         s = MOTORS.serial
         if s is None:
@@ -1019,20 +1059,36 @@ async def read_arduino_serial() -> None:
         try:
             line = await asyncio.to_thread(s.readline)
             line = line.decode("utf-8", errors="replace").strip()
-            if line:
-                try:
-                    data = json.loads(line)
-                    topic = data.get("topic")
-                    value = data.get("value")
-                    if topic and value is not None:
-                        mqtt_publish(topic, value)
-                        STATE.latest_sensors[topic] = value
-                        if topic == "device/health":
-                            STATE.device_health.update(value)
-                except json.JSONDecodeError:
-                    mqtt_publish("arduino/raw", {"line": line})
-        except Exception:
+            if not line:
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                print(f"[arduino] unparseable line: {line[:120]}")
+                mqtt_publish("arduino/raw", {"line": line})
+                continue
+            topic = data.get("topic")
+            value = data.get("value")
+            if not topic or value is None:
+                print(f"[arduino] line is missing topic/value: {line[:120]}")
+                continue
+            if topic == "device/log":
+                level = str(value.get("level", "info")) if isinstance(value, dict) else "info"
+                msg = str(value.get("msg", value)) if isinstance(value, dict) else str(value)
+                print(f"[arduino/{level}] {msg}")
+                mqtt_publish(topic, value)
+                continue
+            mqtt_publish(topic, value)
+            STATE.latest_sensors[topic] = value
+            if topic == "device/health":
+                # The board's own claim about itself; the live serial link is
+                # what /health trusts, so this only fills in other keys.
+                for key, val in value.items():
+                    if key != "arduino_door":
+                        STATE.device_health[key] = val
+        except Exception as exc:
             # Port disappeared — drop it and retry the reconnect path.
+            print(f"[serial] read failed ({type(exc).__name__}: {exc}); reconnecting")
             MOTORS.close()
             await asyncio.sleep(2)
 
@@ -1055,18 +1111,29 @@ async def handle_command(data: dict) -> dict:
         return {"type": "ack", "cmd": cmd}
 
     if cmd == "MOVE":
-        angle = float(data.get("angle", 0))
-        speed = int(data.get("speed", 0))
+        # A malformed angle/speed must not take the whole control socket down.
+        try:
+            angle = float(data.get("angle", 0))
+            speed = int(data.get("speed", 0))
+        except (TypeError, ValueError) as exc:
+            print(f"[ws] bad MOVE payload {data!r}: {exc}")
+            return {"type": "error", "message": f"invalid angle/speed: {exc}"}
         if speed <= 0:
             MOTORS.stop()
             return {"type": "ack", "cmd": cmd, "direction": "STOP"}
         direction = MOTORS.direction_for_angle(angle)
-        MOTORS.write(direction)
+        if not MOTORS.write(direction):
+            # The app should know the wheels never got the command.
+            return {"type": "error", "cmd": cmd, "message": "serial link is down; command not sent"}
         STATE.rover_status = {**STATE.rover_status, "state": "manual"}
         return {"type": "ack", "cmd": cmd, "direction": direction, "angle": angle}
 
     if cmd == "SET_SPEED":
-        STATE.speed_limit = int(data.get("value", STATE.speed_limit))
+        try:
+            STATE.speed_limit = int(data.get("value", STATE.speed_limit))
+        except (TypeError, ValueError) as exc:
+            print(f"[ws] bad SET_SPEED payload {data!r}: {exc}")
+            return {"type": "error", "message": f"invalid speed: {exc}"}
         return {"type": "ack", "cmd": cmd, "value": STATE.speed_limit}
 
     if cmd == "PATROL_START":
@@ -1087,11 +1154,14 @@ async def handle_command(data: dict) -> dict:
 
     if cmd == "BUZZER":
         # Reuse the Arduino's buzzer if it exposes one; otherwise beep the Pi.
-        MOTORS.write("BUZZER")
+        if not MOTORS.write("BUZZER"):
+            return {"type": "error", "cmd": cmd, "message": "serial link is down; buzzer not sent"}
         return {"type": "ack", "cmd": cmd}
 
     if cmd == "SPEAK":
         text = str(data.get("text", ""))[:500]
+        if not SPEAKER.engine:
+            print(f"[ws] SPEAK ignored — no TTS engine available (text: {text[:60]!r})")
         SPEAKER.say(text)
         return {"type": "ack", "cmd": cmd, "speaking": text}
 
@@ -1099,6 +1169,7 @@ async def handle_command(data: dict) -> dict:
         SPEAKER.stop()
         return {"type": "ack", "cmd": cmd}
 
+    print(f"[ws] unknown command from app: {data!r}")
     return {"type": "error", "message": f"unknown command: {cmd}"}
 
 
@@ -1109,9 +1180,15 @@ async def control_handler(websocket) -> None:
         async for message in websocket:
             try:
                 data = json.loads(message)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as exc:
+                print(f"[ws] ignoring malformed frame from {peer}: {exc}")
                 continue
-            reply = await handle_command(data)
+            try:
+                reply = await handle_command(data)
+            except Exception as exc:
+                # Never drop a client because one command misbehaved.
+                print(f"[ws] command raised {type(exc).__name__}: {exc}")
+                reply = {"type": "error", "message": "internal error handling command"}
             if reply:
                 await websocket.send(json.dumps(reply))
     except Exception as exc:
@@ -1139,7 +1216,11 @@ _ZC: Zeroconf | None = None
 
 def start_mdns() -> None:
     global _ZC
-    if not CFG.enable_mdns or Zeroconf is None:
+    if not CFG.enable_mdns:
+        print("[mdns] disabled by CS_ENABLE_MDNS")
+        return
+    if Zeroconf is None:
+        print("[mdns] zeroconf not installed — the app must discover the Pi by scan")
         return
     try:
         _ZC = Zeroconf()
@@ -1165,7 +1246,9 @@ def get_local_ip() -> str:
         ip = s.getsockname()[0]
         s.close()
         return ip
-    except Exception:
+    except Exception as exc:
+        # This silently breaks discovery, so it must not stay quiet.
+        print(f"[net] could not determine the LAN IP ({exc}); mDNS will advertise 127.0.0.1")
         return "127.0.0.1"
 
 
@@ -1189,15 +1272,35 @@ async def publish_health_loop() -> None:
     The app also polls GET /health, so this keeps working even when the broker
     is unavailable.
     """
+    warned_serial = False
+    warned_camera = False
     while True:
+        # Only the live serial link decides the Arduino's state. Trusting the
+        # board's own "online" claim would keep reporting a healthy Arduino
+        # after its cable is pulled.
+        arduino_online = MOTORS.connected
+        camera_online = CAMERA.online
         payload = {
             **STATE.device_health,
-            "arduino_door": "online" if MOTORS.connected else STATE.device_health.get("arduino_door", "offline"),
+            "arduino_door": "online" if arduino_online else "offline",
             "rover": "online",
-            "camera": "online" if CAMERA.online else "offline",
+            "camera": "online" if camera_online else "offline",
             "pi": pi_stats() or {},
         }
         mqtt_publish("device/health", payload)
+
+        # Warn once per transition instead of once per 10 s.
+        if not arduino_online and not warned_serial:
+            warned_serial = True
+            print(f"[serial] Arduino is offline: {MOTORS.last_error or 'not connected'}")
+        elif arduino_online:
+            warned_serial = False
+        if not camera_online and not warned_camera:
+            warned_camera = True
+            print(f"[camera] stream is offline: {CAMERA.reason}")
+        elif camera_online:
+            warned_camera = False
+
         await asyncio.sleep(10)
 
 
@@ -1247,19 +1350,25 @@ def pi_stats() -> dict | None:
             temps = psutil.sensors_temperatures()
             if temps:
                 temp = round(list(temps.values())[0][0].current, 1)
-        except Exception:
+            else:
+                print("[pi] no temperature sensors reported (temp shown as 0)")
+        except Exception as exc:
+            print(f"[pi] could not read the temperature sensor: {exc}")
             temp = None
         return {"cpu": round(load), "ram": round(ram), "temp": temp or 0,
                 "uptime": int(time.time() - psutil.boot_time())}
-    except Exception:
+    except Exception as exc:
+        print(f"[pi] stats unavailable: {exc}")
         return None
 
 
 @app.get("/health")
 async def health():
+    # arduino_door reflects the live serial link, never the board's own claim:
+    # otherwise a pulled cable still reports "online" from a stale heartbeat.
     devices = {
         **STATE.device_health,
-        "arduino_door": "online" if MOTORS.connected else STATE.device_health.get("arduino_door", "offline"),
+        "arduino_door": "online" if MOTORS.connected else "offline",
         "rover": "online",
         "camera": "online" if CAMERA.online else "offline",
     }
@@ -1271,7 +1380,7 @@ async def health():
         "version": GATEWAY_VERSION,
         **devices,
         "devices": devices,
-        "serial": {"port": MOTORS.port, "error": MOTORS.last_error},
+        "serial": {"port": MOTORS.port, "error": MOTORS.last_error, "connected": MOTORS.connected},
         "camera_info": CAMERA.status(),
         "pi": pi_stats(),
         "speaker": SPEAKER.describe(),
