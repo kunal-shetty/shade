@@ -19,6 +19,7 @@ Env:  see CONFIG below (all optional).
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import os
 import queue
@@ -27,8 +28,10 @@ import subprocess
 import tempfile
 import threading
 import time
+import urllib.request
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import uvicorn
@@ -83,6 +86,12 @@ class Config:
     incident_store: Path = Path(os.getenv("CS_INCIDENT_STORE", "incidents.json"))
     # Camera / MJPEG stream
     camera_enable: bool = os.getenv("CS_CAMERA_ENABLE", "1") != "0"
+    # auto | picamera | usb | external | off
+    camera_source: str = os.getenv("CS_CAMERA_SOURCE", "auto")
+    # Used when camera_source=external: an MJPEG URL you already serve yourself.
+    camera_external_url: str = os.getenv("CS_CAMERA_EXTERNAL_URL", "")
+    camera_stream_path: str = os.getenv("CS_CAMERA_STREAM_PATH", "/stream.mjpg")
+    camera_snapshot_path: str = os.getenv("CS_CAMERA_SNAPSHOT_PATH", "/snapshot.jpg")
     camera_device: str = os.getenv("CS_CAMERA_DEVICE", "/dev/video0")
     camera_port: int = int(os.getenv("CS_CAMERA_PORT", "8080"))
     camera_size: str = os.getenv("CS_CAMERA_SIZE", "640x480")
@@ -97,7 +106,7 @@ CFG = Config()
 
 # Bumped whenever the deployed behaviour changes, so `/health` and setup.sh can
 # prove which gateway build is actually running on the Pi.
-GATEWAY_VERSION = "1.1.0"
+GATEWAY_VERSION = "1.2.0"
 
 
 # ---------------------------------------------------------------------------
@@ -277,42 +286,210 @@ MOTORS = MotorBus(CFG)
 
 
 # ---------------------------------------------------------------------------
-# CAMERA — supervised MJPEG stream for the app's live feed
+# CAMERA — one HTTP endpoint for the app, whatever the capture backend
+#
+# Sources (CS_CAMERA_SOURCE):
+#   auto      pick the best available at runtime (picamera -> external -> usb)
+#   picamera  CSI Camera Module through Picamera2 (Raspberry Pi OS default)
+#   usb       USB webcam through ffmpeg on /dev/videoN
+#   external  proxy an MJPEG URL you already serve yourself
+#   off       disable
+#
+# The app always consumes http://<pi>:<port><camera_stream_path>, so changing
+# hardware never requires an app change.
 # ---------------------------------------------------------------------------
 
-class CameraManager:
-    """Owns the MJPEG stream the app renders at `/stream.mjpg`.
+JPEG_SOI = b"\xff\xd8"
+JPEG_EOI = b"\xff\xd9"
 
-    ffmpeg itself serves the HTTP endpoint (`-listen 1`), so provisionning needs
-    no extra systemd unit: the gateway starts, restarts and stops it. Recording
-    reads back off that same HTTP stream instead of `/dev/video0`, which avoids
-    two processes fighting over the capture device.
+
+def iter_jpegs(stream, chunk_size: int = 65536):
+    """Yield complete JPEG frames from a continuous byte stream.
+
+    Works for an ffmpeg stdout pipe, an MJPEG HTTP response, or any source that
+    keeps producing concatenated JPEGs. `read1` is preferred so a partially
+    filled chunk is returned immediately instead of blocking for `chunk_size`.
+    """
+    read = getattr(stream, "read1", None) or stream.read
+    buf = b""
+    while True:
+        chunk = read(chunk_size)
+        if not chunk:
+            return
+        buf += chunk
+        while True:
+            start = buf.find(JPEG_SOI)
+            if start < 0:
+                buf = buf[-1:]
+                break
+            end = buf.find(JPEG_EOI, start + 2)
+            if end < 0:
+                buf = buf[start:]
+                break
+            yield buf[start:end + 2]
+            buf = buf[end + 2:]
+
+
+class _MjpegRequestHandler(BaseHTTPRequestHandler):
+    """Serves the live stream, a JPEG snapshot and a browser preview page."""
+
+    protocol_version = "HTTP/1.0"
+    manager = None  # bound per server instance
+
+    def log_message(self, *_args) -> None:  # keep the journal readable
+        return
+
+    def do_GET(self) -> None:  # noqa: N802
+        path = self.path.split("?", 1)[0]
+        cfg = self.manager.cfg
+
+        if path in ("/", "/index.html"):
+            body = (
+                "<!DOCTYPE html><html><head><title>CyberSentinel Camera</title></head>"
+                "<body style='margin:0;background:#0b1220;color:#e2e8f0;font-family:sans-serif'>"
+                f"<h4 style='padding:8px'>CyberSentinel camera</h4>"
+                f"<img src='{cfg.camera_stream_path}' width='640'>"
+                "</body></html>"
+            ).encode()
+            self._send(200, "text/html", body)
+            return
+
+        if path == cfg.camera_snapshot_path:
+            frame = self.manager.snapshot()
+            if frame is None:
+                self.send_error(503, "no frame yet")
+                return
+            self._send(200, "image/jpeg", frame)
+            return
+
+        if path == cfg.camera_stream_path:
+            self.send_response(200)
+            self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.end_headers()
+            try:
+                for frame in self.manager.frames():
+                    self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n")
+                    self.wfile.write(b"Content-Length: " + str(len(frame)).encode() + b"\r\n\r\n")
+                    self.wfile.write(frame + b"\r\n")
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                pass
+            return
+
+        self.send_error(404)
+
+    def _send(self, code: int, content_type: str, body: bytes) -> None:
+        self.send_response(code)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.end_headers()
+        try:
+            self.wfile.write(body)
+        except OSError:
+            pass
+
+
+class _MjpegServer(ThreadingHTTPServer):
+    daemon_threads = True
+    allow_reuse_address = True
+
+
+class CameraManager:
+    """Owns the MJPEG endpoint the app renders.
+
+    Whichever backend is active, the gateway serves the stream itself, so there
+    is no separate camera service to enable and the app URL never changes.
+    Recording reads the live stream back over HTTP, which means it never fights
+    the capture device for exclusive access.
     """
 
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self._proc: subprocess.Popen | None = None
-        self._lock = threading.Lock()
-        self._stop = threading.Event()
-        self.night = False
+        self.source = "none"
         self.reason = "disabled" if not cfg.camera_enable else "starting"
+        self.night = False
+        self._stop = threading.Event()
+        self._frame: bytes | None = None
+        self._frame_seq = 0
+        self._frame_at = 0.0
+        self._frame_cond = threading.Condition()
+        self._server: _MjpegServer | None = None
+        self._ffmpeg: subprocess.Popen | None = None
+        self._picam = None
+        self._log_path = Path(tempfile.gettempdir()) / "cybersentinel-camera.log"
         try:
             self.cfg.record_dir.mkdir(parents=True, exist_ok=True)
         except Exception:
             pass
-        self._thread = threading.Thread(target=self._loop, name="camera", daemon=True)
-        self._thread.start()
+        threading.Thread(target=self._supervise, name="camera", daemon=True).start()
+
+    # ---- shared frame buffer -------------------------------------------
 
     @property
     def online(self) -> bool:
-        with self._lock:
-            return bool(self._proc and self._proc.poll() is None)
+        if self.source == "none" or self._frame_at == 0.0:
+            return False
+        return (time.time() - self._frame_at) < 6
 
     @property
     def device_present(self) -> bool:
+        if self.source == "picamera":
+            return True
+        if self.source == "external":
+            return bool(self.cfg.camera_external_url)
         return Path(self.cfg.camera_device).exists()
 
-    def _stream_cmd(self) -> list[str]:
+    def snapshot(self) -> bytes | None:
+        with self._frame_cond:
+            return self._frame
+
+    def frames(self):
+        seen = -1
+        while not self._stop.is_set():
+            with self._frame_cond:
+                if self._frame_seq == seen:
+                    self._frame_cond.wait(timeout=1.0)
+                seq, frame = self._frame_seq, self._frame
+            if frame is None or seq == seen:
+                continue
+            seen = seq
+            yield frame
+
+    def _on_frame(self, jpeg: bytes) -> None:
+        with self._frame_cond:
+            self._frame = jpeg
+            self._frame_seq += 1
+            self._frame_at = time.time()
+            self._frame_cond.notify_all()
+
+    # ---- backend selection --------------------------------------------
+
+    @staticmethod
+    def picamera_available() -> bool:
+        """True when Picamera2 can see a CSI camera on this board."""
+        try:
+            from picamera2 import Picamera2
+            return len(Picamera2.global_camera_info()) > 0
+        except Exception:
+            return False
+
+    def _resolve_source(self) -> str:
+        want = (self.cfg.camera_source or "auto").lower()
+        if want == "off":
+            return "none"
+        if want != "auto":
+            return want
+        if self.picamera_available():
+            return "picamera"
+        if self.cfg.camera_external_url:
+            return "external"
+        if Path(self.cfg.camera_device).exists():
+            return "usb"
+        return "none"
+
+    def _usb_filters(self) -> list[str]:
         filters: list[str] = []
         if self.cfg.camera_rotate == "180":
             filters.append("hflip,vflip")
@@ -323,69 +500,196 @@ class CameraManager:
         if self.night:
             # Software low-light boost; hardware IR is handled by camera_night_ctrl.
             filters.append("eq=brightness=0.18:contrast=1.35:saturation=0.6")
+        return filters
+
+    # ---- supervision ---------------------------------------------------
+
+    def _serve(self) -> bool:
+        """Start the MJPEG HTTP server once. False when the port is unusable."""
+        if self._server is not None:
+            return True
+        handler = type("_BoundMjpegHandler", (_MjpegRequestHandler,), {"manager": self})
+        try:
+            self._server = _MjpegServer(("0.0.0.0", self.cfg.camera_port), handler)
+        except OSError as exc:
+            self.reason = f"port {self.cfg.camera_port} unavailable: {exc}"
+            print(f"[camera] {self.reason}")
+            return False
+        threading.Thread(target=self._server.serve_forever, name="camera-http", daemon=True).start()
+        print(f"[camera] MJPEG server on :{self.cfg.camera_port}{self.cfg.camera_stream_path}")
+        return True
+
+    def _supervise(self) -> None:
+        if not self.cfg.camera_enable:
+            self.reason = "disabled"
+            return
+        while not self._stop.is_set():
+            self.source = self._resolve_source()
+            if self.source == "none":
+                self.reason = (
+                    "no camera found - install python3-picamera2 for the CSI camera "
+                    f"or attach a USB camera at {self.cfg.camera_device}"
+                )
+                self._stop.wait(10)
+                continue
+            if self.source == "external" and not self.cfg.camera_external_url:
+                self.reason = "CS_CAMERA_SOURCE=external needs CS_CAMERA_EXTERNAL_URL"
+                self._stop.wait(10)
+                continue
+            if not self._serve():
+                self._stop.wait(10)
+                continue
+
+            if self.source == "picamera":
+                self._run_picamera()
+            elif self.source == "external":
+                self._run_external()
+            else:
+                self._run_usb()
+            self._stop.wait(3)
+
+    def _run_picamera(self) -> None:
+        """CSI Camera Module via Picamera2 (the standard Raspberry Pi stack).
+
+        Uses Picamera2's own JPEG encoder rather than OpenCV, so this needs no
+        extra Python packages beyond python3-picamera2.
+        """
+        try:
+            from picamera2 import Picamera2
+            from picamera2.encoders import MJPEGEncoder
+            from picamera2.outputs import FileOutput
+        except Exception as exc:
+            self.reason = (
+                f"picamera2 not importable ({exc}) - install python3-picamera2 and "
+                "recreate the venv with --system-site-packages"
+            )
+            print(f"[camera] {self.reason}")
+            return
+
+        class _Sink(io.BufferedIOBase):
+            def __init__(self, sink):
+                self._sink = sink
+
+            def write(self, buf):
+                self._sink(bytes(buf))
+                return len(buf)
+
+        cam = None
+        try:
+            width, height = (int(v) for v in self.cfg.camera_size.lower().split("x"))
+            cam = Picamera2()
+            cam.configure(cam.create_video_configuration(main={"size": (width, height)}))
+            cam.start_recording(MJPEGEncoder(), FileOutput(_Sink(self._on_frame)))
+            cam.start()
+            self._picam = cam
+            if self.night:
+                self._apply_picamera_night(cam, True)
+            self.reason = "streaming (picamera)"
+            print(f"[camera] picamera streaming {self.cfg.camera_size}@{self.cfg.camera_fps}")
+
+            # Wait for the first frame, then treat a stalled encoder as a failure
+            # so the supervisor rebuilds the pipeline.
+            deadline = time.time() + 10
+            while not self._stop.is_set() and self._frame_at == 0.0 and time.time() < deadline:
+                time.sleep(0.2)
+            if self._frame_at == 0.0:
+                self.reason = "picamera produced no frames"
+                return
+            while not self._stop.is_set():
+                if (time.time() - self._frame_at) > 6:
+                    self.reason = "picamera stream stalled"
+                    return
+                time.sleep(0.5)
+        except Exception as exc:
+            self.reason = f"picamera failed: {exc}"
+            print(f"[camera] {self.reason}")
+        finally:
+            self._picam = None
+            if cam is not None:
+                try:
+                    cam.stop()
+                    cam.close()
+                except Exception:
+                    pass
+
+    def _run_usb(self) -> None:
+        """USB webcam through ffmpeg, piped to stdout and re-served by us."""
+        if not shutil.which("ffmpeg"):
+            self.reason = "ffmpeg not installed (apt-get install ffmpeg)"
+            return
+        if not Path(self.cfg.camera_device).exists():
+            self.reason = f"{self.cfg.camera_device} not present"
+            return
 
         cmd = [
             "ffmpeg", "-nostdin", "-loglevel", "warning",
             "-f", "v4l2", "-framerate", str(self.cfg.camera_fps),
             "-video_size", self.cfg.camera_size, "-i", self.cfg.camera_device,
         ]
+        filters = self._usb_filters()
         if filters:
             cmd += ["-vf", ",".join(filters)]
-        cmd += [
-            "-f", "mpjpeg", "-listen", "1",
-            "-headers", "Access-Control-Allow-Origin: *\r\n",
-            f"http://0.0.0.0:{self.cfg.camera_port}/stream.mjpg",
-        ]
-        return cmd
+        cmd += ["-f", "mjpeg", "-"]
 
-    def _loop(self) -> None:
-        if not self.cfg.camera_enable:
-            self.reason = "disabled"
-            return
-        if not shutil.which("ffmpeg"):
-            self.reason = "ffmpeg not installed"
-            print("[camera] ffmpeg is missing — install it with `apt-get install ffmpeg`")
-            return
+        try:
+            with open(self._log_path, "wb") as logf:
+                proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=logf)
+                self._ffmpeg = proc
+                self.reason = "streaming (usb)"
+                print(f"[camera] ffmpeg v4l2 {self.cfg.camera_device} -> "
+                      f":{self.cfg.camera_port}{self.cfg.camera_stream_path}")
+                stdout = proc.stdout
+                if stdout is None:
+                    self.reason = "ffmpeg produced no output pipe"
+                    return
+                for frame in iter_jpegs(stdout):
+                    if self._stop.is_set():
+                        return
+                    self._on_frame(frame)
+        except Exception as exc:
+            self.reason = f"ffmpeg failed: {exc}"
+        finally:
+            self._kill_ffmpeg()
+            if not self._stop.is_set() and not self.reason.startswith("ffmpeg failed"):
+                self.reason = read_tail(self._log_path) or "ffmpeg exited"
 
-        log_path = Path(tempfile.gettempdir()) / "cybersentinel-camera.log"
-        while not self._stop.is_set():
-            if not self.device_present:
-                self.reason = f"{self.cfg.camera_device} not present"
-                self._stop.wait(5)
-                continue
+    def _run_external(self) -> None:
+        """Proxy an MJPEG stream you already run (e.g. your own Flask app)."""
+        url = self.cfg.camera_external_url
+        try:
+            with urllib.request.urlopen(url, timeout=6) as response:
+                self.reason = f"proxying {url}"
+                print(f"[camera] proxying {url}")
+                for frame in iter_jpegs(response):
+                    if self._stop.is_set():
+                        return
+                    self._on_frame(frame)
+        except Exception as exc:
+            self.reason = f"upstream unavailable: {exc}"
+            print(f"[camera] {self.reason}")
+
+    def _kill_ffmpeg(self) -> None:
+        proc, self._ffmpeg = self._ffmpeg, None
+        if proc is not None and proc.poll() is None:
             try:
-                with open(log_path, "wb") as logf:
-                    with self._lock:
-                        self._proc = subprocess.Popen(
-                            self._stream_cmd(), stdout=subprocess.DEVNULL, stderr=logf
-                        )
-                        proc = self._proc
-                self.reason = "streaming"
-                print(f"[camera] MJPEG on :{self.cfg.camera_port}/stream.mjpg "
-                      f"({self.cfg.camera_size}@{self.cfg.camera_fps}, night={self.night})")
-                proc.wait()
-                if not self._stop.is_set():
-                    tail = read_tail(log_path)
-                    self.reason = tail or f"ffmpeg exited with code {proc.returncode}"
-                    print(f"[camera] ffmpeg exited: {self.reason}")
-            except Exception as exc:
-                self.reason = str(exc)
-                print(f"[camera] error: {exc}")
-            finally:
-                with self._lock:
-                    self._proc = None
-            self._stop.wait(3)
+                proc.terminate()
+                proc.wait(timeout=3)
+            except Exception:
+                pass
 
-    def _restart(self) -> None:
-        """Kill the stream so the supervisor respawns it with the new filters."""
-        with self._lock:
-            if self._proc is not None and self._proc.poll() is None:
-                self._proc.terminate()
+    @staticmethod
+    def _apply_picamera_night(cam, on: bool) -> None:
+        cam.set_controls(
+            {"Brightness": 0.25, "Contrast": 1.4, "Saturation": 0.5}
+            if on
+            else {"Brightness": 0.0, "Contrast": 1.0, "Saturation": 1.0}
+        )
 
     def set_night_mode(self, on: bool) -> dict:
         want = bool(on)
         hardware = None
-        if self.cfg.camera_night_ctrl and shutil.which("v4l2-ctl"):
+        if (self.cfg.camera_night_ctrl and shutil.which("v4l2-ctl")
+                and Path(self.cfg.camera_device).exists()):
             try:
                 subprocess.run(
                     ["v4l2-ctl", "-d", self.cfg.camera_device, "--set-ctrl", self.cfg.camera_night_ctrl],
@@ -396,15 +700,28 @@ class CameraManager:
                 hardware = None
         if want != self.night:
             self.night = want
-            self._restart()
-        return {"ok": True, "night_mode": self.night, "hardware_control": hardware}
+            if self.source == "picamera" and self._picam is not None:
+                try:
+                    self._apply_picamera_night(self._picam, want)
+                except Exception as exc:
+                    print(f"[camera] night mode failed: {exc}")
+            elif self.source == "usb":
+                # Respawn ffmpeg so the new video filters take effect.
+                self._kill_ffmpeg()
+        return {
+            "ok": True,
+            "night_mode": self.night,
+            "source": self.source,
+            "supported": self.source in ("picamera", "usb"),
+            "hardware_control": hardware,
+        }
 
     def record(self, seconds: int = 15) -> dict:
         if not self.online:
             return {"ok": False, "detail": self.reason or "camera stream is not running"}
         seconds = max(1, min(120, int(seconds)))
         path = self.cfg.record_dir / f"clip-{time.strftime('%Y%m%d-%H%M%S')}.mkv"
-        url = f"http://127.0.0.1:{self.cfg.camera_port}/stream.mjpg"
+        url = f"http://127.0.0.1:{self.cfg.camera_port}{self.cfg.camera_stream_path}"
         cmd = [
             "ffmpeg", "-nostdin", "-loglevel", "error", "-y",
             "-f", "mpjpeg", "-i", url,
@@ -426,12 +743,15 @@ class CameraManager:
         return {"ok": True, "path": str(path), "seconds": seconds}
 
     def status(self) -> dict:
+        base = f"http://{self.cfg.hostname}.local:{self.cfg.camera_port}"
         return {
             "online": self.online,
+            "source": self.source,
             "device": self.cfg.camera_device,
             "device_present": self.device_present,
             "port": self.cfg.camera_port,
-            "stream_url": f"http://{self.cfg.hostname}.local:{self.cfg.camera_port}/stream.mjpg",
+            "stream_url": f"{base}{self.cfg.camera_stream_path}",
+            "snapshot_url": f"{base}{self.cfg.camera_snapshot_path}",
             "night_mode": self.night,
             "recording": STATE.recording,
             "detail": self.reason,
@@ -439,7 +759,20 @@ class CameraManager:
 
     def stop(self) -> None:
         self._stop.set()
-        self._restart()
+        self._kill_ffmpeg()
+        if self._server is not None:
+            try:
+                self._server.shutdown()
+            except Exception:
+                pass
+            self._server = None
+        cam, self._picam = self._picam, None
+        if cam is not None:
+            try:
+                cam.stop()
+                cam.close()
+            except Exception:
+                pass
 
 
 def read_tail(path: Path, lines: int = 3) -> str:
