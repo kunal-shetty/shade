@@ -4,13 +4,18 @@ import { WebView } from 'react-native-webview';
 import Svg, { Rect } from 'react-native-svg';
 import { palette, spacing, useTheme } from '../theme/theme';
 import { useLiveData } from '../store/rover';
+import { useSettings } from '../store/settings';
 import { getStreamUri } from '../services/api';
 
 export const StreamView = ({ height = 260 }: { height?: number }) => {
   const c = useTheme();
   const detections = useLiveData((s) => s.detections);
   const motionActive = useLiveData((s) => s.motionActive);
-  const uri = useMemo(() => getStreamUri(), []);
+  // Re-resolve when discovery changes the host, otherwise the WebView keeps a stale URL.
+  const host = useSettings((s) => s.connection.host);
+  const streamPort = useSettings((s) => s.connection.streamPort);
+  const demoMode = useSettings((s) => s.connection.demoMode);
+  const uri = useMemo(() => getStreamUri(), [host, streamPort, demoMode]);
 
   const boxes = detections?.persons ?? [];
 
