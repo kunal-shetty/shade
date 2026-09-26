@@ -13,7 +13,8 @@
 # the provisioning, so you can fix the broker afterwards.
 set -uo pipefail
 
-REPO_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REPO_DIR="$(cd "$(di
+rname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_DIR="/opt/cybersentinel"
 RUN_USER="${SUDO_USER:-pi}"
 HOSTNAME_TARGET="cybersentinel"
@@ -38,7 +39,14 @@ apt-get install -y python3-venv python3-pip \
   mosquitto mosquitto-clients \
   avahi-daemon libnss-mdns \
   espeak-ng alsa-utils \
-  ffmpeg v4l-utils || die "apt-get install failed"
+  ffmpeg v4l-utils \
+  python3-picamera2 || die "apt-get install failed"
+
+# Optional: the libcamera CLI, for eyeballing the CSI camera outside our code.
+# It is the only way to test the ribbon camera without the gateway.
+apt-get install -y rpicam-apps >/dev/null 2>&1 \
+  || apt-get install -y libcamera-apps >/dev/null 2>&1 \
+  || warn "No libcamera CLI installed (optional)"
 
 # ---------------------------------------------------------------------------
 # mDNS hostname
@@ -154,9 +162,26 @@ else
 fi
 
 log "Creating Python virtualenv"
-python3 -m venv "${INSTALL_DIR}/venv" || die "Could not create the virtualenv"
+# picamera2 and libcamera are apt packages living in the system dist-packages.
+# A venv without --system-site-packages cannot import them, which silently
+# disables the CSI camera, so recreate the venv if it was built the old way.
+if [[ -f "${INSTALL_DIR}/venv/pyvenv.cfg" ]] \
+   && grep -q '^include-system-site-packages = false' "${INSTALL_DIR}/venv/pyvenv.cfg"; then
+  warn "Existing venv cannot see system packages — recreating it with --system-site-packages"
+  rm -rf "${INSTALL_DIR}/venv"
+fi
+python3 -m venv --system-site-packages "${INSTALL_DIR}/venv" \
+  || die "Could not create the virtualenv"
 "${INSTALL_DIR}/venv/bin/pip" install --upgrade pip || warn "pip upgrade failed"
 "${INSTALL_DIR}/venv/bin/pip" install -r "${REPO_DIR}/pi/requirements.txt" || die "pip install failed"
+
+# Fail loudly rather than silently losing the camera backend.
+if "${INSTALL_DIR}/venv/bin/python" -c "from picamera2 import Picamera2; print(len(Picamera2.global_camera_info()))" >/dev/null 2>&1; then
+  log "picamera2 importable from the venv (CSI camera available)"
+else
+  warn "picamera2 is not importable from the venv — the CSI camera will be reported offline."
+  warn "Install/enable it with: apt-get install -y python3-picamera2"
+fi
 
 chown -R "${RUN_USER}:${RUN_USER}" "${INSTALL_DIR}"
 
@@ -226,7 +251,8 @@ if cam is None:
     print("    [!!] camera  : no camera_info - the deployed gateway.py is stale")
 else:
     mark = "[ok]" if cam.get("online") else "[--]"
-    print(f"    {mark} camera  : {'online' if cam.get('online') else 'offline'} - {cam.get('detail')}")
+    print(f"    {mark} camera  : {'online' if cam.get('online') else 'offline'} "
+          f"[{cam.get('source', '?')}] - {cam.get('detail')}")
 print(f"    [--] arduino : {data.get('arduino_door')}")
 PY
 fi
