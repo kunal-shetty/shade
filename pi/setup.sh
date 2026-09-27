@@ -717,6 +717,28 @@ except Exception as exc:
 PY
 fi
 
+# The check above dials 127.0.0.1, which a socket bound to localhost - or a
+# firewall - leaves green while every phone on the WiFi still gets "connection
+# refused". Same hop, but over the address the app actually dials.
+LAN_IP_CHECK="$(hostname -I 2>/dev/null | awk '{print $1}')"
+if [[ -n "${LAN_IP_CHECK}" ]]; then
+  if (exec 3<>"/dev/tcp/${LAN_IP_CHECK}/${WS_PORT}") 2>/dev/null; then
+    exec 3<&- 2>/dev/null || true
+    log "The control socket answers on the LAN (${LAN_IP_CHECK}:${WS_PORT})"
+  else
+    warn "The control socket does NOT answer on ${LAN_IP_CHECK}:${WS_PORT}, so the app"
+    warn "will get 'connection refused' even though localhost worked above."
+    warn "  sudo ss -ltnp | grep ${WS_PORT}          (is it 0.0.0.0 or 127.0.0.1?)"
+    warn "  sudo ufw status && sudo ufw allow ${WS_PORT}/tcp"
+  fi
+
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | head -n 1 | grep -qi active; then
+    warn "ufw is active - the app needs ${WS_PORT}/tcp, ${API_PORT}/tcp, ${CAM_PORT}/tcp and 9001/tcp:"
+    warn "  sudo ufw allow ${WS_PORT}/tcp && sudo ufw allow ${API_PORT}/tcp"
+    warn "  sudo ufw allow ${CAM_PORT}/tcp && sudo ufw allow 9001/tcp"
+  fi
+fi
+
 # dialout is what lets the gateway open /dev/ttyACM0 at all. A user added to it
 # keeps the OLD group list in any process that started before the change, so this
 # inspects the running service rather than trusting /etc/group.
@@ -741,10 +763,30 @@ fi
 IP="$(hostname -I | awk '{print $1}')"
 cat <<EOF
 
-  Gateway:   http://${HOSTNAME_TARGET}.local:${API_PORT}/health   (IP ${IP})
-  Camera:    http://${HOSTNAME_TARGET}.local:${CAM_PORT}/stream.mjpg
-  Controls:  ws://${HOSTNAME_TARGET}.local:${WS_PORT}   (the app's joystick + buttons)
-  MQTT/WS:   ws://${HOSTNAME_TARGET}.local:9001   (live telemetry)
+  App connection  (Settings -> Connection -> "Pi IP Address"):
+    host          ${IP}
+    ws port       ${WS_PORT}     joystick + buttons (control socket)
+    api port      ${API_PORT}    REST + discovery probe
+    mqtt port     9001    live telemetry (MQTT over WebSocket)
+    stream port   ${CAM_PORT}    camera (/stream.mjpg)
+    demo mode     OFF
+
+  Enter the IP, not the mDNS name: Android's resolver does not speak mDNS, so
+  an app pointed at ${HOSTNAME_TARGET}.local fails with
+  java.net.UnknownHostException instead of connecting. The name below is only
+  usable from a computer (Linux/macOS/Windows) on the same WiFi:
+    gateway  http://${HOSTNAME_TARGET}.local:${API_PORT}/health
+    camera   http://${HOSTNAME_TARGET}.local:${CAM_PORT}/stream.mjpg
+    control  ws://${HOSTNAME_TARGET}.local:${WS_PORT}
+    mqtt     ws://${HOSTNAME_TARGET}.local:9001
+  The app's "Find Pi on this WiFi" scans the subnet for ${IP}, so a DHCP lease
+  change does not need to be typed in - but the phone and the Pi must be on the
+  same network, with no client isolation (guest WiFi usually blocks it).
+
+  Local checks (on the Pi itself, where mDNS resolves fine):
+    curl -s http://127.0.0.1:${API_PORT}/health
+    curl -s "http://127.0.0.1:${CAM_PORT}/snapshot.jpg" -o shot.jpg && ls -lh shot.jpg
+
   Logs:      journalctl -u cybersentinel-gateway -f
              journalctl -u mosquitto -f
 
@@ -755,7 +797,6 @@ cat <<EOF
     espeak-ng "CyberSentinel online"
 
   Camera check:
-    curl -s "http://127.0.0.1:${CAM_PORT}/snapshot.jpg" -o shot.jpg && ls -lh shot.jpg
     ${INSTALL_DIR}/venv/bin/python -c 'from picamera2 import Picamera2; print(Picamera2.global_camera_info())'
 
   Motor check:
