@@ -9,20 +9,14 @@
     "backgroundColor": "#1E3A5F",
     "plugins": [
       [
-        "expo-speech-recognition",
-        {
-          "microphonePermission": "Allow CyberSentinel to listen for rover voice commands.",
-          "speechRecognitionPermission": "Allow CyberSentinel to transcribe your voice commands."
-        }
-      ],
-      [
         "expo-build-properties",
         {
           "android": {
             "usesCleartextTraffic": true
           }
         }
-      ]
+      ],
+      "expo-font"
     ],
     "ios": {
       "supportsTablet": true,

@@ -56,6 +56,7 @@ export default function App() {
 
       let cancelled = false;
       void startAutoDiscovery(() => {
+        
         if (cancelled) return;
         disconnectMqtt();
         disconnectRoverLink();

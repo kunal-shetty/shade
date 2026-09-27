@@ -1,3 +1,4 @@
+import * as Speech from 'expo-speech';
 import { useLiveData } from '../store/rover';
 import { isIpv4, useSettings } from '../store/settings';
 import { discoverPi } from './discovery';
@@ -40,6 +41,28 @@ const scheduleHostHeal = (immediate = false) => {
 
 const listeners = new Set<(ack: Record<string, unknown>) => void>();
 
+// ---- Startup greeting ------------------------------------------------------
+// Spoken once per app launch, as soon as a link exists to speak through. The
+// rover's speaker is preferred (same SPEAK path voice replies use); demo mode
+// or a dead Pi falls back to the phone's own voice.
+export const STARTUP_GREETING = 'Good morning Mohini maam';
+let greetedThisSession = false;
+
+const speakGreeting = () => {
+  if (greetedThisSession) return;
+  greetedThisSession = true;
+  const { piSpeakerEnabled, phoneSpeakerFallback, voiceLanguage } = useSettings.getState().prefs;
+  if (piSpeakerEnabled && sendRoverCommand({ cmd: 'SPEAK', text: STARTUP_GREETING })) return;
+  if (phoneSpeakerFallback) {
+    try {
+      Speech.stop();
+      Speech.speak(STARTUP_GREETING, { language: voiceLanguage || 'en-IN' });
+    } catch {
+      // ignore: a greeting must never break the connection it rides on
+    }
+  }
+};
+
 export const onRoverAck = (fn: (ack: Record<string, unknown>) => void): (() => void) => {
   listeners.add(fn);
   return () => listeners.delete(fn);
@@ -80,6 +103,7 @@ export const connectRoverLink = () => {
 
   if (demoMode) {
     useLiveData.getState().setWsState('demo');
+    speakGreeting();
     return;
   }
 
@@ -102,6 +126,7 @@ export const connectRoverLink = () => {
     healBackoffMs = 1500;
     useLiveData.getState().setWsState('connected');
     startPing();
+    speakGreeting();
   };
 
   socket.onmessage = (ev) => {

@@ -8,7 +8,7 @@ import { useDiscovery } from '../store/discovery';
 import { Card } from '../components/ui';
 import { disconnectMqtt, connectMqtt } from '../services/mqtt';
 import { connectRoverLink, disconnectRoverLink } from '../services/roverLink';
-import { discoverPi } from '../services/discovery';
+import { discoverPi, setDiscoveryDebug } from '../services/discovery';
 import { DEFAULT_SPEAKER_TEST_TEXT, stopSpeakerTest, testPiSpeaker } from '../services/speakerTest';
 import { getTypesafeKey, setTypesafeKey } from '../services/secrets';
 import { registerPushToken, requestNotificationPermission } from '../services/notifications';
@@ -85,6 +85,7 @@ export const SettingsScreen = () => {
   const [speakerBusy, setSpeakerBusy] = useState(false);
   const [speakerStatus, setSpeakerStatus] = useState('');
   const [speakerOk, setSpeakerOk] = useState<boolean | null>(null);
+  const [debugOn, setDebugOn] = useState(false);
   const discovery = useDiscovery();
 
   useEffect(() => {
@@ -287,6 +288,9 @@ export const SettingsScreen = () => {
             <Ionicons name="wifi" size={15} color="white" />
             <Text style={styles.wideBtnText}>{discoveryBusy ? ' Searching…' : ' Find Pi on this WiFi'}</Text>
           </View>
+          <Row label="Discovery debug log" hint="Logs every probe step; read with adb logcat or Expo dev tools">
+            <Switch value={debugOn} onValueChange={(v) => { setDebugOn(v); setDiscoveryDebug(v); }} />
+          </Row>
           <Row label="WebSocket Port" hint="Rover commands"><NumberField value={connection.wsPort} onChange={(v) => setConnection({ wsPort: v })} /></Row>
           <Row label="MQTT Port" hint="MQTT over WebSocket"><NumberField value={connection.mqttPort} onChange={(v) => setConnection({ mqttPort: v })} /></Row>
           <Row label="FastAPI Port" hint="REST API"><NumberField value={connection.apiPort} onChange={(v) => setConnection({ apiPort: v })} /></Row>
