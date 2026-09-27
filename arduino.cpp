@@ -39,7 +39,7 @@ void sendLog(const char *level, const char *msg);
 void reportError(const char *msg);
 void reportWarn(const char *msg);
 void scanHardwareI2C();
-void drawEye(U8G2 &display, int mode, int pupilOffset, bool blink, bool isLeft);
+void drawEye(U8G2 &display, int mode, int pupilOffset, bool blink, bool pointsRight);
 void drawMouth(int mode, int talkingFrame);
 void updateFace(unsigned long now);
 void setMotor(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
@@ -210,12 +210,12 @@ void startHorn(uint16_t ms) {
 // ==========================================
 // DRAW EYE
 //
-// Left panel shows  >   right panel shows  <
-// Both chevrons point inward, toward the face centre.
+// Left panel shows  <   right panel shows  >
+// Both chevrons point outward, away from the face centre.
 // mode / pupilOffset are kept for API compatibility; unused now.
 // ==========================================
 void drawEye(U8G2 &display, int mode, int pupilOffset,
-             bool blink, bool isLeft) {
+             bool blink, bool pointsRight) {
 
   display.firstPage();
   do {
@@ -226,8 +226,8 @@ void drawEye(U8G2 &display, int mode, int pupilOffset,
       display.drawLine(20, 32, 108, 32);
       display.drawLine(20, 33, 108, 33);
 
-    } else if (isLeft) {
-      // > — arms open left, tip points right (toward face center)
+    } else if (pointsRight) {
+      // > — arms open left, tip points right (away from face center)
       for (int8_t t = 0; t < 3; t++) {
         display.drawLine(20, 8  + t, 100 + t, 32);   // upper arm
         display.drawLine(20, 56 - t, 100 + t, 32);   // lower arm
@@ -236,7 +236,7 @@ void drawEye(U8G2 &display, int mode, int pupilOffset,
       display.drawDisc(82, 13, 2);
 
     } else {
-      // < — arms open right, tip points left (toward face center)
+      // < — arms open right, tip points left (away from face center)
       for (int8_t t = 0; t < 3; t++) {
         display.drawLine(108, 8  + t, 28 - t, 32);   // upper arm
         display.drawLine(108, 56 - t, 28 - t, 32);   // lower arm
@@ -349,8 +349,8 @@ void updateFace(unsigned long now) {
   if (look == 2) pupilOffset = -12;
 
   // Draw both eyes
-  if (oledOk & EYE_LEFT)  drawEye(leftEye,  expression, pupilOffset, blinking, true);
-  if (oledOk & EYE_RIGHT) drawEye(rightEye, expression, pupilOffset, blinking, false);
+  if (oledOk & EYE_LEFT)  drawEye(leftEye,  expression, pupilOffset, blinking, false);
+  if (oledOk & EYE_RIGHT) drawEye(rightEye, expression, pupilOffset, blinking, true);
 
   // Animate mouth while talking
   int talkingFrame = (now / 250) % 2;
@@ -468,9 +468,9 @@ void setup() {
              (oledOk & MOUTH)     ? '1' : '-');
   sendLog("info", boot);
 
-  // First frame: open eyes ( > and < ), neutral mouth
-  drawEye(leftEye,  1, 0, false, true);
-  drawEye(rightEye, 1, 0, false, false);
+  // First frame: open eyes ( < and > ), neutral mouth
+  drawEye(leftEye,  1, 0, false, false);
+  drawEye(rightEye, 1, 0, false, true);
   drawMouth(1, 0);
 }
 
