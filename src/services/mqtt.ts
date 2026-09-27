@@ -87,7 +87,6 @@ const ALL_TOPICS = [
   'rover/status',
   'rover/telemetry',
   'threat/level',
-  'sensor/door',
   'sensor/pir',
   'sensor/gas',
   'sensor/env',
@@ -126,11 +125,6 @@ export const handleMqttMessage = (topic: string, raw: string) => {
     }
     case 'threat/level': {
       L.setThreat(m as unknown as MqttThreat);
-      break;
-    }
-    case 'sensor/door': {
-      const open = Boolean(m.open);
-      L.upsertSensor('door', { label: 'Door (Reed)', value: open ? 'OPEN' : 'Closed', status: open ? 'alert' : 'online' });
       break;
     }
     case 'sensor/pir': {

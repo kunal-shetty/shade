@@ -29,7 +29,7 @@ export const startDemoEngine = () => {
   // Seed a few historical incidents so the timeline is populated immediately
   const seedRows: [Severity, string, string, number, number][] = [
     ['medium', 'Zone B', 'Motion detected during off-hours', 34, 1000 * 60 * 60 * 5],
-    ['low', 'Zone A', 'Door opened with valid RFID auth', 18, 1000 * 60 * 60 * 26],
+    ['low', 'Zone A', 'Authorized RFID entry', 18, 1000 * 60 * 60 * 26],
   ];
   for (const [sev, zn, sum, score, ago] of seedRows) {
     const ts = Date.now() - ago;
@@ -81,7 +81,6 @@ export const startDemoEngine = () => {
   startTimer(() => {
     handleMqttMessage('sensor/env', JSON.stringify({ temp: +(27.5 + Math.random()).toFixed(1), humidity: Math.round(58 + Math.random() * 8) }));
     handleMqttMessage('sensor/gas', JSON.stringify({ ppm: Math.round(300 + Math.random() * 40), alarm: false }));
-    handleMqttMessage('sensor/door', JSON.stringify({ open: false }));
     handleMqttMessage('sensor/pir', JSON.stringify({ motion: false }));
     handleMqttMessage('camera/detections', JSON.stringify({ persons: [] }));
   }, 2500);
@@ -89,7 +88,7 @@ export const startDemoEngine = () => {
   // --- device health ---
   startTimer(() => {
     handleMqttMessage('device/health', JSON.stringify({
-      arduino_door: 'online', pir_node: 'online', gas_node: 'online', rover: 'online', camera: 'online',
+      arduino: 'online', pir_node: 'online', gas_node: 'online', rover: 'online', camera: 'online',
       pi: { cpu: Math.round(30 + Math.random() * 20), ram: 46, temp: 52, uptime: 86400 * 3 },
     }));
   }, 5000);
@@ -98,17 +97,14 @@ export const startDemoEngine = () => {
   startTimer(() => {
     scenarioStep = (scenarioStep + 1) % 18;
     const S = scenarioStep;
-    if (S === 2) {
-      handleMqttMessage('sensor/door', JSON.stringify({ open: true }));
-    } else if (S === 4) {
+    if (S === 4) {
       handleMqttMessage('sensor/pir', JSON.stringify({ motion: true }));
     } else if (S === 5) {
-      // door open + no RFID + motion => threat climbs past 76
-      handleMqttMessage('threat/level', JSON.stringify({ level: 'critical', score: 82, triggers: ['motion', 'door_open', 'no_rfid', 'person'] }));
+      // no RFID + motion => threat climbs past 76
+      handleMqttMessage('threat/level', JSON.stringify({ level: 'critical', score: 82, triggers: ['motion', 'no_rfid', 'person'] }));
       handleMqttMessage('camera/detections', JSON.stringify({ persons: [{ x: 340, y: 120, w: 90, h: 210 }] }));
-      createDemoIncident('critical', 'Zone A', 'Intrusion pattern: door open, no RFID, motion + person detected', 82, ['motion', 'door_open', 'no_rfid', 'person']);
+      createDemoIncident('critical', 'Zone A', 'Intrusion pattern: no RFID, motion + person detected', 82, ['motion', 'no_rfid', 'person']);
     } else if (S === 9) {
-      handleMqttMessage('sensor/door', JSON.stringify({ open: false }));
       handleMqttMessage('sensor/pir', JSON.stringify({ motion: false }));
       handleMqttMessage('threat/level', JSON.stringify({ level: 'low', score: 6, triggers: [] }));
       handleMqttMessage('camera/detections', JSON.stringify({ persons: [] }));
@@ -141,9 +137,8 @@ export const createDemoIncident = (
     ts: now,
     status: 'open',
     events: [
-      { ts: now - 6000, label: 'Door opened (reed switch)' },
+      { ts: now - 6000, label: 'Off-hours motion detected (PIR)' },
       { ts: now - 5000, label: 'No RFID auth within 60 s window' },
-      { ts: now - 4000, label: 'PIR motion detected' },
       { ts: now - 3000, label: 'Person detected via camera (OpenCV)' },
       { ts: now - 2000, label: 'Rover dispatched to zone' },
       { ts: now, label: `Incident created — score ${score}` },
@@ -151,7 +146,7 @@ export const createDemoIncident = (
     sensorSnapshot: Object.values(useLiveData.getState().sensors),
     score,
     contributions: triggers.map((trg) => {
-      const pts: Record<string, number> = { motion: 20, door_open: 20, no_rfid: 30, person: 20, gas: 25, night: 10, vibration: 15, fire: 30 };
+      const pts: Record<string, number> = { motion: 20, no_rfid: 30, person: 20, gas: 25, night: 10, vibration: 15, fire: 30 };
       return { factor: trg, label: trg.replace('_', ' '), points: pts[trg] ?? 10 };
     }),
     photoUrl: null,

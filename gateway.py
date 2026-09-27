@@ -5,7 +5,7 @@ Bridges the phone app to the hardware:
   * WebSocket  :8765  rover commands (STOP / MOVE / PATROL / BUZZER / SPEAK …)
   * HTTP       :8000  REST API (health, sensors, incidents, alarm, camera)
   * MQTT       :1883  telemetry fan-out (Mosquitto, websockets listener enabled)
-  * Serial     USB    Arduino motor + reed switch node
+  * Serial     USB    Arduino motor + buzzer node
   * Speaker    GPIO/USB text-to-speech (espeak-ng / piper)
 
 Everything is zero-config: the phone discovers this Pi on the shared WiFi via
@@ -923,7 +923,7 @@ class GatewayState:
 
 STATE = GatewayState(
     latest_sensors={},
-    device_health={"arduino_door": "offline", "pir_node": "offline", "gas_node": "offline",
+    device_health={"arduino": "offline", "pir_node": "offline", "gas_node": "offline",
                    "rover": "online", "camera": "offline"},
     rover_status={"state": "idle", "battery": 100, "zone": "Unknown"},
     incidents=[],
@@ -1084,7 +1084,7 @@ async def read_arduino_serial() -> None:
                 # The board's own claim about itself; the live serial link is
                 # what /health trusts, so this only fills in other keys.
                 for key, val in value.items():
-                    if key != "arduino_door":
+                    if key != "arduino":
                         STATE.device_health[key] = val
         except Exception as exc:
             # Port disappeared — drop it and retry the reconnect path.
@@ -1282,7 +1282,7 @@ async def publish_health_loop() -> None:
         camera_online = CAMERA.online
         payload = {
             **STATE.device_health,
-            "arduino_door": "online" if arduino_online else "offline",
+            "arduino": "online" if arduino_online else "offline",
             "rover": "online",
             "camera": "online" if camera_online else "offline",
             "pi": pi_stats() or {},
@@ -1364,11 +1364,11 @@ def pi_stats() -> dict | None:
 
 @app.get("/health")
 async def health():
-    # arduino_door reflects the live serial link, never the board's own claim:
+    # arduino reflects the live serial link, never the board's own claim:
     # otherwise a pulled cable still reports "online" from a stale heartbeat.
     devices = {
         **STATE.device_health,
-        "arduino_door": "online" if MOTORS.connected else "offline",
+        "arduino": "online" if MOTORS.connected else "offline",
         "rover": "online",
         "camera": "online" if CAMERA.online else "offline",
     }

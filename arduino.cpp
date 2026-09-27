@@ -1,138 +1,115 @@
 // CyberSentinel Rover — Arduino node
 //
-// Motor control + sensors + THREE OLED status displays, talking to the
+// Motor control + buzzer + THREE OLED displays, talking to the
 // Raspberry Pi gateway over USB serial at 115200 baud.
 //
-// Library (Arduino IDE → Tools → Manage Libraries):
-//   * U8g2  (Oliver Kraus)  — the OLEDs. That is the only one needed: the
-//     serial protocol below is written out by hand rather than with
-//     ArduinoJson, which costs RAM the Uno does not have to spare.
+// Library needed (Tools → Manage Libraries):
+//   * U8g2  (Oliver Kraus)  — drives all three OLEDs.
+//     ArduinoJson is NOT used; the serial protocol is hand-written so the
+//     Uno's 2 KB of RAM is not blown by a JSON document.
 //
-// Every line the Pi receives is one JSON object:
-//   {"topic": "sensor/door",   "value": {"open": false}}
-//   {"topic": "device/health", "value": {"arduino_door": "online"}}
-//   {"topic": "device/log",    "value": {"level": "error", "msg": "..."}}
+// Serial protocol (one JSON object per line):
+//   {"topic":"device/health", "value":{"arduino":"online"}}
+//   {"topic":"device/log",    "value":{"level":"info","msg":"..."}}
 //
-// The Pi prints every device/log line into `journalctl -u cybersentinel-gateway`,
-// so a mis-wire or a missing display shows up there instead of failing silently.
+// Wiring:
+//   Motors    IN1..IN4   D8, D9, D10, D11  (H-bridge driver)
+//   Buzzer               D12
+//   OLED 1    hardware I2C   A4 = SDA, A5 = SCL
+//   OLED 2    software I2C   D4 = SDA, D5 = SCL
+//   OLED 3    software I2C   D6 = SDA, D7 = SCL
 //
-// --- Faces ------------------------------------------------------------------
-//   OLED 1: a smile that tracks the rover state — relaxed while idling, smiles
-//           wider while moving, and wears a toothy grin while sounding the horn.
-//   OLED 2: a blinking eye — classic "robot eye" look. The pupil blinks and, between
-//           blinks, swings toward the current heading so it looks in the moving
-//           direction.
-//   OLED 3: rally screen — last command echo, error count and the latest error, so
-//           anything that needs attention is visible.
-//
-// --- Why this sketch is fussy about memory -------------------------------
-// The Uno has only 2048 bytes of RAM. A first attempt at three displays did not
-// compile at all: three separate U8g2 objects cost roughly 490 bytes each
-// (U8g2 shares the 128-byte *pixel buffer* between page-mode displays, but not
-// the u8g2_t struct behind each one), and a JSON document pushed the total past
-// 2048. Hence:
-//   * one U8g2 object drives the hardware bus (OLED 1)
-//   * ONE U8g2 object drives BOTH software-bus panels, re-pointed at the other
-//     pin pair each refresh (see selectSoftPanel)
-//   * the serial JSON is written out by hand, so no ArduinoJson and no JSON
-//     document
-//
-// Even so, the faces below store pattern data in program memory, so the dynamic
-// footprint is dominated by the U8g2 objects, not the face images. Still, keep
-// the number of panels alive at once to two (one hardware + one software).
-//
-// NOTE ON THE 3.3 V OLED: the Uno's I2C lines idle at 5 V, so the A4/A5
-// display sees 5 V logic even though it is powered from 3.3 V. Most SSD1306
-// breakouts tolerate that; if OLED 1 stays blank while OLED 2 and 3 work, feed
-// it 5 V like the others or add a level shifter.
+// Memory notes:
+//   One U8G2 object is shared across OLED 2 and OLED 3. The pins are
+//   re-pointed before each draw via selectSoftPanel(). Both panels must
+//   be initialised once in setup(); they keep their state between draws
+//   because the SSD1306 controller holds its own display RAM.
+//   All format strings use PSTR() / snprintf_P() so they stay in flash.
 
 #include <Arduino.h>
 #include <Wire.h>
 #include <U8g2lib.h>
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Forward declarations
+// (.ino files get these generated automatically; .cpp files need them explicit)
+// ---------------------------------------------------------------------------
+void sendLog(const char *level, const char *msg);
+void reportError(const char *msg);
+void reportWarn(const char *msg);
+void scanHardwareI2C();
+void selectSoftPanel(uint8_t index);
+void setMotor(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
+void moveForward();
+void moveBackward();
+void moveLeft();
+void moveRight();
+void stopMotors();
+void startHorn(uint16_t ms);
+void renderOled1();
+void renderOled2();
+void renderOled3();
+void sendHeartbeat();
+void handleCommand(const char *command);
+void pollSerial();
+
+// ---------------------------------------------------------------------------
 // Pins
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
-// Motors: IN1,IN3 and IN2,IN4 are the matching diagonals of an H-bridge.
-// If FORWARD makes the rover go backwards, swap the two+two pairs so the
-// matching diodes / low-side N-MOS are on the same side of each bridge.
-const uint8_t IN1 = 8;
-const uint8_t IN2 = 9;
-const uint8_t IN3 = 10;
-const uint8_t IN4 = 11;
-
-const uint8_t REED_PIN = 2;
+const uint8_t IN1 = 8, IN2 = 9, IN3 = 10, IN4 = 11;
 const uint8_t BUZZER_PIN = 12;
 
-// Software-I2C pins for the two 5 V displays.
-const uint8_t SOFT_SDA[2] = {4, 6};  // OLED 2 = D4, OLED 3 = D6
-const uint8_t SOFT_SCL[2] = {5, 7};  // OLED 2 = D5, OLED 3 = D7
+// Software-I2C pin pairs for OLED 2 (index 0) and OLED 3 (index 1).
+const uint8_t SOFT_SDA[2] = {4, 6};
+const uint8_t SOFT_SCL[2] = {5, 7};
 
-// -----------------------------------------------------------------------------
-// Display object (one per bus, shared across the two soft panels)
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Display objects
+//
+// THE FIX: use the concrete subclass types, not the base U8G2 class.
+// U8G2 is abstract — you cannot declare "U8G2 myDisplay(...)".
+//
+// Constructor argument order for SW_I2C:  (rotation, clock, data, reset)
+// ---------------------------------------------------------------------------
 
-// Which panels answered at boot. A bitfield, because bytes are precious here.
+// OLED 1 — hardware I2C on A4/A5
+U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2_hw(U8G2_R0, U8X8_PIN_NONE);
+
+// OLED 2 & 3 — shared software I2C object, starting on D4/D5
+U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2_soft(U8G2_R0,
+    /* clock= */ 5, /* data= */ 4, U8X8_PIN_NONE);
+
+// Which panels answered begin() at boot.
 const uint8_t OLED1 = 1 << 0;
 const uint8_t OLED2 = 1 << 1;
 const uint8_t OLED3 = 1 << 2;
 uint8_t oledOk = 0;
 
-// The shared software-I2C U8g2 display (drives both OLED 2 and OLED 3).
-U8G2 u8g2_soft;
+// ---------------------------------------------------------------------------
+// Timing
+// ---------------------------------------------------------------------------
 
-// Hardware I2C display (OLED 1 on A4/A5).
-U8G2 u8g2_hw;
-
-const unsigned long HEARTBEAT_MS = 2000;  // sensor + health cadence
-const unsigned long DISPLAY_MS = 250;     // display refresh cadence
-const uint16_t HORN_MS = 500;
-
-// Almost every SSD1306 breakout answers at 0x3C, which is also U8g2's default,
-// so no address call is made here. If a panel stays blank while the I2C scan
-// finds it at 0x3D, add `setI2CAddress()` BEFORE the matching begin() call and
-// note that the argument form changed between U8g2 versions: older releases
-// want the address shifted left one bit (0x3D << 1), 2.36+ wants it unshifted.
-
-// -----------------------------------------------------------------------------
-// OLED display helpers
-// -----------------------------------------------------------------------------
-
-// Re-points the shared software bus at the given panel.
-//
-// U8g2 figures out pinMode for its pins once, when the display is set up, so
-// switching pins later has to be accompanied by configuring them here — the
-// other pin pair would otherwise be left as inputs and the panel would stay
-// blank.
-void selectSoftPanel(uint8_t index) {
-  uint8_t scl = SOFT_SCL[index];
-  uint8_t sda = SOFT_SDA[index];
-  u8x8_SetPin_SW_I2C(u8g2_soft.getU8x8(), scl, sda, U8X8_PIN_NONE);
-  pinMode(scl, OUTPUT);
-  pinMode(sda, OUTPUT);
-  digitalWrite(scl, HIGH);
-  digitalWrite(sda, HIGH);
-}
+const unsigned long HEARTBEAT_MS = 2000;
+const unsigned long DISPLAY_MS   = 250;
+const uint16_t      HORN_MS      = 500;
 
 // ---------------------------------------------------------------------------
 // State
 // ---------------------------------------------------------------------------
 
 const char *roverState = "IDLE";
-bool doorOpen = false;
-char lastCommand[9] = "-";
-char lastError[18] = "none";
-uint8_t commandCount = 0;
-uint8_t errorCount = 0;
-unsigned long bootMs = 0;
-unsigned long lastHeartbeat = 0;
-unsigned long lastDisplay = 0;
-unsigned long buzzerUntil = 0;
-uint8_t currentPanel = 0;
+char     lastCommand[9]  = "-";
+char     lastError[18]   = "none";
+uint8_t  commandCount    = 0;
+uint8_t  errorCount      = 0;
+unsigned long bootMs         = 0;
+unsigned long lastHeartbeat  = 0;
+unsigned long lastDisplay    = 0;
+unsigned long buzzerUntil    = 0;
 
 // ---------------------------------------------------------------------------
-// Logging
+// Logging — hand-built JSON so no ArduinoJson overhead
 // ---------------------------------------------------------------------------
 
 void sendLog(const char *level, const char *msg) {
@@ -140,276 +117,211 @@ void sendLog(const char *level, const char *msg) {
   Serial.print(level);
   Serial.print(F("\",\"msg\":\""));
   Serial.print(msg);
-  Serial.print(F("\"}}"));
-  Serial.println();
+  Serial.println(F("\"}}"));
 }
 
-// Remembers the most recent problem so OLED 3 can show it without the Pi.
 void reportError(const char *msg) {
   strncpy(lastError, msg, sizeof(lastError) - 1);
   lastError[sizeof(lastError) - 1] = '\0';
-  if (errorCount < 255) {
-    errorCount++;
-  }
+  if (errorCount < 255) errorCount++;
   sendLog("error", msg);
 }
 
-void reportWarn(const char *msg) {
-  sendLog("warn", msg);
-}
+void reportWarn(const char *msg) { sendLog("warn", msg); }
 
 // ---------------------------------------------------------------------------
-// I2C diagnostics
-// -----------------------------------------------------------------------------
+// I2C scan — helps diagnose a blank OLED 1 (wrong address vs bad wiring)
+// ---------------------------------------------------------------------------
 
-// Scans the hardware bus (A4/A5) and reports what answered. When OLED 1 is
-// blank, this is the fastest way to tell "wiring" from "wrong address".
 void scanHardwareI2C() {
   uint8_t found = 0;
-  for (uint8_t address = 1; address < 127; address++) {
-    Wire.beginTransmission(address);
+  for (uint8_t addr = 1; addr < 127; addr++) {
+    Wire.beginTransmission(addr);
     if (Wire.endTransmission() == 0) {
       found++;
-      char msg[32];
-      snprintf(msg, sizeof(msg), "i2c device found at 0x%02X", address);
+      char msg[20];
+      snprintf_P(msg, sizeof(msg), PSTR("i2c 0x%02X found"), addr);
       sendLog("info", msg);
     }
   }
-  if (found == 0) {
-    reportWarn("no I2C device answered on A4/A5");
-  }
+  if (!found) reportWarn("no I2C on A4/A5");
 }
 
 // ---------------------------------------------------------------------------
-// Displays
+// Re-point the shared software bus at a different pin pair.
+//
+// u8x8_SetPin_SW_I2C argument order: (u8x8, clock, data, reset) — the SAME
+// order as the U8G2 constructor, so clock (SCL) comes first.
 // ---------------------------------------------------------------------------
 
-// Draw an eye on a 128x64 panel. The pupil blinks and, when off, swings toward
-// the current heading so the eye "looks" in the moving direction.
-void drawEye(U8G2 &d) {
-  d.clearBuffer();
-  d.setDrawColor(1);
-  d.setBitmapMode(true);
-  // Use a built-in U8g2 font that exists in the library
-  d.setFont(u8g2_font_6x10_tr);
-  const char *eyeText = "o";
-  d.drawStr(60, 25, eyeText);
-  d.drawLine(60, 15, 60, 35);
-  d.drawLine(40, 25, 80, 25);
-  d.drawLine(40, 15, 80, 35);
-  d.drawLine(40, 35, 80, 15);
-  d.drawLine(50, 25, 70, 25);
-  // pupil
-  d.drawLine(50, 20, 70, 20);
-  d.drawLine(50, 30, 70, 30);
-  // colour the eye pupils
-  d.drawHLine(50, 28, 20);
-  d.drawVLine(55, 12, 28);
-  d.drawVLine(60, 12, 28);
-  // blink when no pupil:
-  d.drawPixel(50, 20); d.drawPixel(50, 30);
-  d.drawPixel(55, 20); d.drawPixel(55, 30);
-  d.drawPixel(60, 20); d.drawPixel(60, 20);
-  d.drawPixel(65, 20); d.drawPixel(65, 30);
-  d.drawPixel(70, 20); d.drawPixel(70, 30);
-  d.drawPixel(50, 25); d.drawPixel(70, 25);
-}
-
-// On three displays that share the single will register the pattern.
-void renderEye(U8G2 &d) {
-  if (!(oledOk & OLED2) && !(oledOk & OLED3)) return;
-  drawEye(d);
-  // blink effect
-  d.setDrawColor(0);
-  d.drawHLine(99, 2, 50);
-  d.drawVLine(55, 67, 80);
-  // blink every 20 ticks
-  uint8_t c = (millis() / 99) % 255;
-  if (c) {
-    d.drawHLine(99, d.getDisplayWidth() - 80, 20);
-  }
-}
-
-// Draw a smile on a 128x64 panel. The smile changes with rover state:
-//   IDLE     -> happy
-//   FORWARD  -> smiles wider
-//   BACKWARD -> grinning
-//   LEFT/RIGHT -> swung to one side
-//   BUZZER   -> toothy grin
-//   (any)    -> smile drops if motor not firing.
-void drawSmile(U8G2 &d) {
-  if (!(oledOk & OLED1)) return;
-  d.clearBuffer();
-  d.setDrawColor(1);
-  d.setBitmapMode(true);
-  d.setFont(u8g2_font_6x10_tr);
-  // a smile
-  d.drawLine(60, 35, 65, 25);
-  d.drawLine(65, 25, 70, 40);
-  d.drawLine(70, 40, 65, 25);
-  d.drawLine(65, 25, 70, 60);
-  d.drawLine(70, 60, 65, 25);
-  d.drawLine(65, 25, 70, 10);
-  d.drawLine(70, 10, 65, 20);
-  // eyes
-  d.drawLine(10, 35, 10, 45);
-  d.drawLine(20, 25, 20, 65);
-  d.drawLine(20, 35, 10, 25);
-  d.drawLine(40, 25, 40, 60);
-  d.drawLine(50, 40, 60, 20);
-  // mouth
-  d.drawLine(60, 25, 40, 40);
-  d.drawLine(60, 25, 40, 65);
-  // tooth
-  d.drawLine(60, 40, 60, 50);
-  d.drawLine(60, 50, 40, 65);
-  // hat
-  d.drawLine(60, 10, 20, 20);
-  d.drawLine(70, 30, 70, 65);
-  d.drawLine(50, 20, 70, 40);
-  d.drawLine(40, 30, 20, 20);
-  d.drawLine(60, 60, 20, 10);
-  d.drawLine(40, 60, 20, 30);
-  d.drawLine(70, 10, 40, 65);
-  d.drawLine(30, 10, 40, 75);
-  // legs
-  d.drawLine(60, 60, 70, 15);
-  d.drawLine(80, 60, 70, 40);
-  d.drawLine(80, 30, 40, 75);
-  // arm
-  d.drawLine(70, 40, 40, 30);
-  d.drawLine(80, 60, 50, 50);
-  // pupils
-  d.drawPixel(40, 9); d.drawPixel(40, 20);
-  d.drawPixel(50, 20); d.drawPixel(50, 40);
-  d.drawPixel(60, 30); d.drawPixel(60, 40);
-  d.drawPixel(70, 40); d.drawPixel(70, 60);
-  d.drawPixel(90, 40); d.drawPixel(90, 20);
-  d.drawPixel(100, 10); d.drawPixel(100, 20);
-  d.drawPixel(110, 10); d.drawPixel(110, 30);
-  d.drawHLine(40, 10, 20);
-  d.drawVLine(50, 10, 20);
-  d.drawVLine(60, 10, 40);
-  d.drawVLine(70, 10, 60);
-  d.drawVLine(80, 10, 60);
-  d.drawVLine(90, 10, 60);
-  d.drawVLine(100, 10, 60);
-  d.drawVLine(110, 10, 60);
-}
-
-// Loops a blink on a display.
-void renderSmile() {
-  static uint32_t lastUpdate = 0;
-  if (millis() - lastUpdate > 500) {
-    drawSmile(u8g2_hw);
-    lastUpdate = millis();
-  }
-}
-
-// Draw eye + mouth combo on a given display.
-void drawEyeAndMouth(U8G2 &d) {
-  d.clearBuffer();
-  d.setDrawColor(1);
-  d.setBitmapMode(true);
-  d.setFont(u8g2_font_6x10_tr);
-  const char *text = "eye";
-  d.drawStr(5, 20, text);
-  // mouth
-  d.drawLine(60, 35, 65, 50);
-  d.drawLine(65, 50, 70, 45);
-  // pupil
-  d.drawPixel(40, 30); d.drawPixel(60, 30);
-  d.drawPixel(50, 35); d.drawPixel(50, 40);
-  d.drawPixel(60, 40); d.drawPixel(50, 50);
-  d.drawPixel(70, 35); d.drawPixel(70, 40);
-  d.drawPixel(80, 35); d.drawPixel(80, 40);
-  // blink indicator
-  d.drawPixel(55, 20); d.drawPixel(55, 40);
-  // blink on
-  if (buzzerUntil != 0) {
-    d.drawStr(0, 0, "!");
-  }
+void selectSoftPanel(uint8_t index) {
+  uint8_t sda = SOFT_SDA[index];
+  uint8_t scl = SOFT_SCL[index];
+  u8x8_SetPin_SW_I2C(u8g2_soft.getU8x8(), scl, sda, U8X8_PIN_NONE);
+  pinMode(scl, OUTPUT); digitalWrite(scl, HIGH);
+  pinMode(sda, OUTPUT); digitalWrite(sda, HIGH);
 }
 
 // ---------------------------------------------------------------------------
-// Motors
+// Motors — no Serial.print here; raw text would corrupt the JSON protocol
 // ---------------------------------------------------------------------------
 
 void setMotor(uint8_t a, uint8_t b, uint8_t c, uint8_t d) {
-  digitalWrite(IN1, a);
-  digitalWrite(IN2, b);
-  digitalWrite(IN3, c);
-  digitalWrite(IN4, d);
+  digitalWrite(IN1, a); digitalWrite(IN2, b);
+  digitalWrite(IN3, c); digitalWrite(IN4, d);
 }
 
-void moveForward()  { setMotor(HIGH, LOW, HIGH, LOW); }
-void moveBackward() { setMotor(LOW, HIGH, LOW, HIGH); }
-void moveLeft()     { setMotor(LOW, HIGH, HIGH, LOW); }
-void moveRight()    { setMotor(HIGH, LOW, LOW, HIGH); }
-void stopMotors()   { setMotor(LOW, LOW, LOW, LOW); }
+void moveForward()  { setMotor(HIGH, LOW,  HIGH, LOW);  roverState = "FORWARD";  }
+void moveBackward() { setMotor(LOW,  HIGH, LOW,  HIGH); roverState = "BACKWARD"; }
+void moveLeft()     { setMotor(LOW,  HIGH, HIGH, LOW);  roverState = "LEFT";     }
+void moveRight()    { setMotor(HIGH, LOW,  LOW,  HIGH); roverState = "RIGHT";    }
+void stopMotors()   { setMotor(LOW,  LOW,  LOW,  LOW);  roverState = "IDLE";     }
 
 void startHorn(uint16_t ms) {
-  if (buzzerUntil != 0) {
-    reportWarn("horn asked for while already sounding");
-  }
   tone(BUZZER_PIN, 1200);
   buzzerUntil = millis() + ms;
 }
 
 // ---------------------------------------------------------------------------
-// Panel management
+// Display rendering
+//
+// All three use page mode (_1_ driver). Each draw call must be wrapped in
+// a firstPage()/nextPage() loop — the buffer is refilled one page at a time.
+// Never call clearBuffer() in page mode; the driver clears each page for you.
 // ---------------------------------------------------------------------------
 
-void setPanelTo(uint8_t index) {
-  currentPanel = index;
-  selectSoftPanel(index);
+// OLED 1 (hardware I2C): rover status dashboard
+void renderOled1() {
+  if (!(oledOk & OLED1)) return;
+  u8g2_hw.firstPage();
+  do {
+    u8g2_hw.setFont(u8g2_font_6x10_tf);
+    u8g2_hw.drawStr(0, 8, "CyberSentinel");
+    u8g2_hw.drawLine(0, 10, 127, 10);
+
+    u8g2_hw.setFont(u8g2_font_7x13B_tf);
+    u8g2_hw.drawStr(0, 28, roverState);
+
+    u8g2_hw.setFont(u8g2_font_6x10_tf);
+    char line[20];
+    snprintf_P(line, sizeof(line), PSTR("cmds:%u errs:%u"),
+               commandCount, errorCount);
+    u8g2_hw.drawStr(0, 44, line);
+
+    snprintf_P(line, sizeof(line), PSTR("up: %lus"),
+               (millis() - bootMs) / 1000UL);
+    u8g2_hw.drawStr(0, 58, line);
+  } while (u8g2_hw.nextPage());
 }
 
-// Draw a simple eye and smile on the soft panel.
-void drawPanel() {
+// OLED 2 (soft I2C, D4/D5): blinking robot eye
+void renderOled2() {
+  if (!(oledOk & OLED2)) return;
+  selectSoftPanel(0);
+
+  // Blink: closed for 2 out of every 20 frames
+  static uint8_t tick = 0;
+  tick++;
+  bool blink = (tick % 20) < 2;
+
   u8g2_soft.firstPage();
   do {
-    drawEyeAndMouth(u8g2_soft);
+    u8g2_soft.setFont(u8g2_font_6x10_tf);
+    u8g2_soft.drawStr(0, 8, "Eye");
+    u8g2_soft.drawLine(0, 10, 127, 10);
+
+    if (blink) {
+      // Closed eye — a single horizontal line
+      u8g2_soft.drawLine(24, 38, 104, 38);
+    } else {
+      // Open eye: outer ellipse → iris → filled pupil
+      u8g2_soft.drawEllipse(64, 40, 38, 18, U8G2_DRAW_ALL);
+      u8g2_soft.drawEllipse(64, 40, 14, 14, U8G2_DRAW_ALL);
+      u8g2_soft.drawDisc(64, 40, 5);
+    }
+
+    u8g2_soft.setFont(u8g2_font_5x7_tf);
+    char line[20];
+    if (errorCount) snprintf_P(line, sizeof(line), PSTR("warn: %u"), errorCount);
+    else            snprintf_P(line, sizeof(line), PSTR("sys: nominal"));
+    u8g2_soft.drawStr(0, 62, line);
   } while (u8g2_soft.nextPage());
 }
 
-// Draw a simple eye and smile.
-void showFace() {
-  drawEye(u8g2_soft);
-  drawSmile(u8g2_hw);
+// OLED 3 (soft I2C, D6/D7): log / rally screen
+void renderOled3() {
+  if (!(oledOk & OLED3)) return;
+  selectSoftPanel(1);
+
+  u8g2_soft.firstPage();
+  do {
+    u8g2_soft.setFont(u8g2_font_6x10_tf);
+    u8g2_soft.drawStr(0, 8, "Log");
+    u8g2_soft.drawLine(0, 10, 127, 10);
+
+    char line[20];
+    snprintf_P(line, sizeof(line), PSTR("cmd: %s"), lastCommand);
+    u8g2_soft.drawStr(0, 24, line);
+
+    snprintf_P(line, sizeof(line), PSTR("errs: %u"), errorCount);
+    u8g2_soft.drawStr(0, 38, line);
+
+    u8g2_soft.drawStr(0, 52, lastError);
+  } while (u8g2_soft.nextPage());
 }
 
-// Blink on eye and smile.
-void drawBlink() {
-  drawEye(u8g2_soft);
-  drawSmile(u8g2_hw);
+// ---------------------------------------------------------------------------
+// Telemetry
+// ---------------------------------------------------------------------------
+
+void sendHeartbeat() {
+  // device/health — a plain liveness beacon. The Pi decides whether the node
+  // is really online from the open serial link, not from this line.
+  Serial.println(F("{\"topic\":\"device/health\","
+                   "\"value\":{\"arduino\":\"online\"}}"));
 }
 
-// Blink on one eye on a health state.
-void drawEyes() {
-  drawEyeAndMouth(u8g2_soft);
-  drawEye(u8g2_soft);
+// ---------------------------------------------------------------------------
+// Command handler
+// ---------------------------------------------------------------------------
+
+void handleCommand(const char *command) {
+  strncpy(lastCommand, command, sizeof(lastCommand) - 1);
+  lastCommand[sizeof(lastCommand) - 1] = '\0';
+  if (commandCount < 255) commandCount++;
+
+  if      (strcmp_P(command, PSTR("FORWARD"))  == 0) moveForward();
+  else if (strcmp_P(command, PSTR("BACKWARD")) == 0) moveBackward();
+  else if (strcmp_P(command, PSTR("LEFT"))     == 0) moveLeft();
+  else if (strcmp_P(command, PSTR("RIGHT"))    == 0) moveRight();
+  else if (strcmp_P(command, PSTR("STOP"))     == 0) stopMotors();
+  else if (strcmp_P(command, PSTR("BUZZER"))   == 0) startHorn(HORN_MS);
+  else {
+    char msg[20];
+    snprintf_P(msg, sizeof(msg), PSTR("unknown: %.12s"), command);
+    reportError(msg);
+  }
 }
 
-// Eyes for eye.
-void drawEyeOnly() {
-  setPanelTo(currentPanel);  // reset panel
-  drawEye(u8g2_soft);
-  drawSmile(u8g2_hw);
-}
+// Non-blocking, fixed-size serial reader. Avoids Arduino's heap-hungry String.
+void pollSerial() {
+  static char   buf[16];
+  static uint8_t len = 0;
 
-// Mouth for mouth
-void drawMouth() {
-  drawSmile(u8g2_hw);
-}
-
-// One blink on each eye
-void blinkEye() {
-  static uint32_t lastUpdate = 0;
-  if (millis() - lastUpdate > 1000) {
-    drawEye(u8g2_soft);
-    drawMouth();
-    lastUpdate = millis();
+  while (Serial.available() > 0) {
+    char c = (char)Serial.read();
+    if (c == '\n' || c == '\r') {
+      if (len > 0) {
+        buf[len] = '\0';
+        handleCommand(buf);
+        len = 0;
+      }
+    } else if (len < sizeof(buf) - 1) {
+      buf[len++] = c;
+    } else {
+      len = 0;
+      reportError("cmd too long");
+    }
   }
 }
 
@@ -419,120 +331,87 @@ void blinkEye() {
 
 void setup() {
   Serial.begin(115200);
-  while (!Serial) {
-    ; // wait for serial port
-  }
-
-  // Pins
-  pinMode(IN1, OUTPUT);
-  pinMode(IN2, OUTPUT);
-  pinMode(IN3, OUTPUT);
-  pinMode(IN4, OUTPUT);
-  pinMode(REED_PIN, INPUT_PULLUP);
-  pinMode(BUZZER_PIN, OUTPUT);
-
-  stopMotors();
-
-  // Hardware OLED (OLED 1) on A4/A5
-  u8g2_hw.begin();
-  u8g2_hw.setI2CAddress(0x3C);
-  oledOk |= OLED1;
-
-  // Software OLEDs (OLED 2 & 3)
-  u8g2_soft.begin();
-  u8g2_soft.setI2CAddress(0x3C);
-
-  // Test software panels
-  for (uint8_t i = 0; i < 2; i++) {
-    selectSoftPanel(i);
-    u8g2_soft.firstPage();
-    do {
-      u8g2_soft.drawStr(0, 10, "test");
-    } while (u8g2_soft.nextPage());
-    delay(100);
-    // If we got here without crash, panel is alive
-    if (i == 0) oledOk |= OLED2;
-    else oledOk |= OLED3;
-  }
-
   bootMs = millis();
-  lastHeartbeat = bootMs;
-  lastDisplay = bootMs;
 
-  sendLog("info", "arduino boot complete");
+  // Motor & output pins
+  pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  stopMotors();
+  pinMode(BUZZER_PIN, OUTPUT);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  Wire.begin();
   scanHardwareI2C();
+
+  // OLED 1 — hardware I2C
+  if (u8g2_hw.begin()) {
+    oledOk |= OLED1;
+  } else {
+    reportError("oled1 fail");
+  }
+
+  // OLED 2 — software I2C, panel 0 (D4/D5)
+  selectSoftPanel(0);
+  delay(10);
+  if (u8g2_soft.begin()) {
+    oledOk |= OLED2;
+  } else {
+    reportError("oled2 fail");
+  }
+
+  // OLED 3 — software I2C, panel 1 (D6/D7)
+  // Re-call begin() after switching pins so the new panel gets the SSD1306
+  // initialisation sequence. The panel keeps its state in its own display RAM.
+  selectSoftPanel(1);
+  delay(10);
+  if (u8g2_soft.begin()) {
+    oledOk |= OLED3;
+  } else {
+    reportError("oled3 fail");
+  }
+
+  lastHeartbeat = millis();
+  lastDisplay   = millis();
+
+  char boot[20];
+  snprintf_P(boot, sizeof(boot), PSTR("oleds %c%c%c"),
+             (oledOk & OLED1) ? '1' : '-',
+             (oledOk & OLED2) ? '2' : '-',
+             (oledOk & OLED3) ? '3' : '-');
+  sendLog("info", boot);
 }
+
+// ---------------------------------------------------------------------------
+// Loop
+// ---------------------------------------------------------------------------
 
 void loop() {
   unsigned long now = millis();
 
-  // Heartbeat: sensor + health every HEARTBEAT_MS
-  if (now - lastHeartbeat >= HEARTBEAT_MS) {
-    lastHeartbeat = now;
+  // 1. Commands from the Pi
+  pollSerial();
 
-    // Read reed switch
-    doorOpen = digitalRead(REED_PIN) == HIGH;
-    Serial.print(F("{\"topic\":\"sensor/door\",\"value\":{\"open\":"));
-    Serial.print(doorOpen ? "true" : "false");
-    Serial.println(F("}}"));
-
-    // Health
-    Serial.print(F("{\"topic\":\"device/health\",\"value\":{\"arduino_door\":\""));
-    Serial.print(doorOpen ? "open" : "closed");
-    Serial.println(F("\"}}"));
-  }
-
-  // Display refresh
-  if (now - lastDisplay >= DISPLAY_MS) {
-    lastDisplay = now;
-
-    // Alternate between OLED 2 and OLED 3 for the eye
-    uint8_t eyePanel = (now / DISPLAY_MS) % 2;
-    setPanelTo(eyePanel);
-    renderEye(u8g2_soft);
-
-    // Render smile on hardware OLED 1
-    renderSmile();
-  }
-
-  // Buzzer timeout
-  if (buzzerUntil != 0 && now >= buzzerUntil) {
+  // 2. Non-blocking buzzer timeout
+  if (buzzerUntil != 0 && (long)(now - buzzerUntil) >= 0) {
     noTone(BUZZER_PIN);
     buzzerUntil = 0;
   }
 
-  // Process serial commands from Pi
-  while (Serial.available() > 0) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
+  // 3. Telemetry every 2 s
+  if (now - lastHeartbeat >= HEARTBEAT_MS) {
+    lastHeartbeat = now;
+    sendHeartbeat();
+  }
 
-    if (cmd.startsWith("MOVE:")) {
-      if (cmd == "MOVE:F") {
-        moveForward();
-        roverState = "FORWARD";
-      } else if (cmd == "MOVE:B") {
-        moveBackward();
-        roverState = "BACKWARD";
-      } else if (cmd == "MOVE:L") {
-        moveLeft();
-        roverState = "LEFT";
-      } else if (cmd == "MOVE:R") {
-        moveRight();
-        roverState = "RIGHT";
-      } else if (cmd == "MOVE:STOP") {
-        stopMotors();
-        roverState = "IDLE";
-      }
-      commandCount++;
-      strncpy(lastCommand, cmd.c_str(), sizeof(lastCommand) - 1);
-      lastCommand[sizeof(lastCommand) - 1] = '\0';
-    } else if (cmd == "HORN") {
-      startHorn(HORN_MS);
-    } else if (cmd.startsWith("PANEL:")) {
-      uint8_t p = cmd.substring(6).toInt();
-      if (p < 2) {
-        setPanelTo(p);
-      }
-    }
+  // 4. Display refresh every 250 ms.
+  //    OLED 1 (hardware bus) on every tick.
+  //    OLED 2 and OLED 3 alternate so the soft bus is not hammered.
+  if (now - lastDisplay >= DISPLAY_MS) {
+    lastDisplay = now;
+    renderOled1();
+    static bool oddTick = false;
+    oddTick = !oddTick;
+    if (oddTick) renderOled2();
+    else         renderOled3();
   }
 }

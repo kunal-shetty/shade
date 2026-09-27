@@ -62,7 +62,7 @@ export const SensorCard = ({ reading }: { reading: SensorReading }) => {
   const c = useTheme();
   const alertState = reading.status === 'alert';
   const iconName: keyof typeof Ionicons.glyphMap =
-    reading.id === 'door' ? 'git-merge' : reading.id === 'pir' ? 'radio-outline' : reading.id === 'gas' ? 'flame' : reading.id === 'rover' ? 'car-sport' : 'pulse';
+    reading.id === 'pir' ? 'radio-outline' : reading.id === 'gas' ? 'flame' : reading.id === 'rover' ? 'car-sport' : 'pulse';
   return (
     <View style={[styles.sensorCard, { backgroundColor: c.card, borderColor: alertState ? `${palette.threatCritical}55` : c.border }]}>
       <View style={styles.sensorTopRow}>

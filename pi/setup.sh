@@ -379,9 +379,9 @@ serial = data.get("serial")
 if serial is None:
     print("    [!!] arduino : no serial block - the deployed gateway.py is stale")
 else:
-    mark = "[ok]" if data.get("arduino_door") == "online" else "[--]"
+    mark = "[ok]" if data.get("arduino") == "online" else "[--]"
     detail = serial.get("error") or f"connected on {serial.get('port')}"
-    print(f"    {mark} arduino : {data.get('arduino_door')} - {detail}")
+    print(f"    {mark} arduino : {data.get('arduino')} - {detail}")
 PY
 fi
 

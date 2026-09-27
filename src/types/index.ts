@@ -27,7 +27,6 @@ export interface ThreatState {
 
 export const THREAT_FACTORS: { id: string; label: string; max: number }[] = [
   { id: 'motion', label: 'Motion Detected', max: 20 },
-  { id: 'door_open', label: 'Door Opened', max: 20 },
   { id: 'no_rfid', label: 'No RFID Auth', max: 30 },
   { id: 'person', label: 'Person Detected', max: 20 },
   { id: 'gas', label: 'Gas / Smoke', max: 25 },
@@ -120,7 +119,7 @@ export interface MqttThreat {
 }
 
 export interface MqttDeviceHealth {
-  arduino_door: 'online' | 'offline';
+  arduino: 'online' | 'offline';
   pir_node: 'online' | 'offline';
   gas_node: 'online' | 'offline';
   rover: 'online' | 'offline';

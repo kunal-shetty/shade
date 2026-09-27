@@ -146,7 +146,7 @@ curl -s http://127.0.0.1:8000/health | python3 -m json.tool | grep -A3 '"serial"
 ```
 
 The Arduino drives the motors from `FORWARD` / `BACKWARD` / `LEFT` / `RIGHT` /
-`STOP` / `BUZZER` lines and reports the reed switch on `sensor/door`.
+`STOP` lines and sounds the buzzer on `BUZZER`.
 
 ### Flashing the sketch from the Pi
 
@@ -196,7 +196,7 @@ because on an Uno a JSON document costs RAM the sketch cannot spare.
 What each panel shows:
 
 * **OLED 1** — rover state (`IDLE` / `FORWARD` / …), command count, uptime, error count
-* **OLED 2** — door open/closed, the raw reed reading, and whether OLED 2/3 initialised
+* **OLED 2** — a blinking robot eye with a `sys: nominal` / `warn: N` status line
 * **OLED 3** — last command, error count, and the last error text
 
 ### Fitting three displays into 2 KB of RAM
@@ -251,9 +251,9 @@ answered, which separates "wrong wiring" from "wrong I2C address".
 
 ### Known gaps
 
-The Arduino firmware only publishes `sensor/door`, `device/health` and
-`device/log`. The `pir_node` and `gas_node` tiles have no publisher, so they stay
-online only if something else emits `sensor/pir` and `sensor/gas`.
+The Arduino firmware only publishes `device/health` and `device/log`. The
+`pir_node` and `gas_node` tiles have no publisher, so they stay online only if
+something else emits `sensor/pir` and `sensor/gas`.
 
 ## 4. Camera
 

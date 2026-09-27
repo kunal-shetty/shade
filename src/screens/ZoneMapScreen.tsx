@@ -20,8 +20,6 @@ const SENSOR_NODES: MapNode[] = [
   { id: 'vib', x: 150, y: 170, label: 'SW-420' },
 ];
 
-const DOOR = { x: 40, y: 60, w: 46, h: 10 };
-
 const ZONES: Record<string, { x: number; y: number; label: string }> = {
   A: { x: 80, y: 110, label: 'Zone A · Entrance' },
   B: { x: 220, y: 150, label: 'Zone B · Lab interior' },
@@ -38,7 +36,6 @@ export const ZoneMapScreen = () => {
   const sensors = useLiveData((s) => s.sensors);
   const [selected, setSelected] = useState<MapNode | null>(null);
 
-  const doorOpen = sensors['door']?.value === 'OPEN';
   const zoneKey = (zone ?? 'Zone A').replace('Zone ', '').trim().charAt(0) || 'A';
   const roverPos = ZONES[zoneKey] ?? ZONES.A;
 
@@ -76,18 +73,6 @@ export const ZoneMapScreen = () => {
           {/* inner partitions */}
           <Rect x={20} y={110} width={150} height={4} fill={c.border} />
           <Rect x={170} y={20} width={4} height={90} fill={c.border} />
-          {/* door gap */}
-          <Rect
-            x={DOOR.x}
-            y={DOOR.y}
-            width={DOOR.w}
-            height={DOOR.h}
-            fill={doorOpen ? palette.threatCritical : palette.threatLow}
-            rx={4}
-          />
-          <SvgText x={DOOR.x + 2} y={DOOR.y - 6} fontSize={10} fill={c.textMuted}>
-            {doorOpen ? 'DOOR OPEN' : 'DOOR CLOSED'}
-          </SvgText>
 
           {/* zone labels */}
           {Object.entries(ZONES).map(([k, z]) => (
@@ -140,11 +125,11 @@ export const ZoneMapScreen = () => {
             </View>
             <View style={styles.legendRow}>
               <Ionicons name="checkmark-circle" size={13} color={palette.threatLow} />
-              <Text style={[typography.caption, { color: c.text }]}> Sensor online / door closed</Text>
+              <Text style={[typography.caption, { color: c.text }]}> Sensor online / no alert</Text>
             </View>
             <View style={styles.legendRow}>
               <Ionicons name="alert" size={13} color={palette.threatCritical} />
-              <Text style={[typography.caption, { color: c.text }]}> Alert state / door open · motion highlight</Text>
+              <Text style={[typography.caption, { color: c.text }]}> Alert state / motion highlight</Text>
             </View>
           </>
         )}
