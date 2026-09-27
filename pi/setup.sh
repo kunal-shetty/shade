@@ -317,15 +317,7 @@ mkdir -p "${INSTALL_DIR}"
 install -m 644 "${REPO_DIR}/gateway.py" "${INSTALL_DIR}/gateway.py"
 [[ -f "${INSTALL_DIR}/gateway.env" ]] || install -m 644 "${REPO_DIR}/pi/gateway.env.example" "${INSTALL_DIR}/gateway.env"
 
-# Vanilla web console, served by the gateway at http://<pi>:8000/app
-if [[ -d "${REPO_DIR}/pi/webapp" ]]; then
-  mkdir -p "${INSTALL_DIR}/webapp"
-  install -m 644 "${REPO_DIR}/pi/webapp/"*.{html,css,js} "${INSTALL_DIR}/webapp/" 2>/dev/null \
-    || install -m 644 "${REPO_DIR}/pi/webapp/index.html" "${REPO_DIR}/pi/webapp/style.css" "${REPO_DIR}/pi/webapp/app.js" "${INSTALL_DIR}/webapp/"
-  log "Web console deployed — http://$(hostname -I 2>/dev/null | awk '{print $1}'):${API_PORT:-8000}/app"
-else
-  warn "pi/webapp missing — the browser console will not be served"
-fi
+# (The Expo app is the only client now — no web console is served.)
 
 # Every port below is read from the DEPLOYED env file, so the checks in this
 # script can never drift from the numbers the gateway actually binds.
@@ -812,9 +804,6 @@ fi
 # ---------------------------------------------------------------------------
 IP="$(hostname -I | awk '{print $1}')"
 cat <<EOF
-
-  Web console (no app needed — open in any browser on the WiFi):
-    http://${IP}:${API_PORT}/app
 
   App connection  (Settings -> Connection -> "Pi IP Address"):
     host          ${IP}

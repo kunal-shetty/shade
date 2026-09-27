@@ -38,8 +38,6 @@ from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from fastapi.staticfiles import StaticFiles
-
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -1491,15 +1489,6 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-
-# Vanilla web console (pi/webapp in the repo, copied to /opt/cybersentinel/webapp
-# by setup.sh). Served by the gateway itself so one URL — http://<pi>:8000/app —
-# works from any browser on the WiFi with no app install and no CORS setup.
-WEBAPP_DIR = Path(__file__).resolve().parent / "webapp"
-if (WEBAPP_DIR / "index.html").is_file():
-    app.mount("/app", StaticFiles(directory=str(WEBAPP_DIR), html=True), name="webapp")
-else:  # pragma: no cover - repo checkout without the webapp copied over
-    print("[web] no webapp/ directory next to gateway.py — /app not served")
 
 
 def pi_stats() -> dict | None:
