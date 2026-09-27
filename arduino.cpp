@@ -15,15 +15,17 @@
 // Wiring:
 //   Motors    IN1..IN4   D8, D9, D10, D11  (H-bridge driver)
 //   Buzzer               D12
-//   OLED 1    hardware I2C   A4 = SDA, A5 = SCL
-//   OLED 2    software I2C   D4 = SDA, D5 = SCL
-//   OLED 3    software I2C   D6 = SDA, D7 = SCL
+//   Mouth     hardware I2C   A4 = SDA, A5 = SCL   (SH1106 128x64)
+//   Left eye  software I2C   D4 = SCL, D5 = SDA   (SH1106 128x64)
+//   Right eye software I2C   D6 = SCL, D7 = SDA   (SH1106 128x64)
 //
 // Memory notes:
-//   One U8G2 object is shared across OLED 2 and OLED 3. The pins are
-//   re-pointed before each draw via selectSoftPanel(). Both panels must
-//   be initialised once in setup(); they keep their state between draws
-//   because the SSD1306 controller holds its own display RAM.
+//   Three separate U8G2 objects, one per panel, so each eye owns its own
+//   software-I2C pin pair and the mouth stays on the hardware bus. These
+//   are the full-buffer (F_) variants, but U8g2 keeps a SINGLE static 1 KB
+//   buffer shared by every full-buffer instance — so three panels still
+//   cost only 1 KB. Each panel is fully redrawn every frame, which is what
+//   makes sharing that buffer safe.
 //   All format strings use PSTR() / snprintf_P() so they stay in flash.
 
 #include <Arduino.h>
@@ -38,7 +40,9 @@ void sendLog(const char *level, const char *msg);
 void reportError(const char *msg);
 void reportWarn(const char *msg);
 void scanHardwareI2C();
-void selectSoftPanel(uint8_t index);
+void drawEye(U8G2 &display, int mode, int pupilOffset, bool blink);
+void drawMouth(int mode, int talkingFrame);
+void updateFace(unsigned long now);
 void setMotor(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
 void moveForward();
 void moveBackward();
@@ -46,9 +50,6 @@ void moveLeft();
 void moveRight();
 void stopMotors();
 void startHorn(uint16_t ms);
-void renderOled1();
-void renderOled2();
-void renderOled3();
 void sendHeartbeat();
 void handleCommand(const char *command);
 void pollSerial();
@@ -60,10 +61,6 @@ void pollSerial();
 const uint8_t IN1 = 8, IN2 = 9, IN3 = 10, IN4 = 11;
 const uint8_t BUZZER_PIN = 12;
 
-// Software-I2C pin pairs for OLED 2 (index 0) and OLED 3 (index 1).
-const uint8_t SOFT_SDA[2] = {4, 6};
-const uint8_t SOFT_SCL[2] = {5, 7};
-
 // ---------------------------------------------------------------------------
 // Display objects
 //
@@ -71,20 +68,45 @@ const uint8_t SOFT_SCL[2] = {5, 7};
 // U8G2 is abstract — you cannot declare "U8G2 myDisplay(...)".
 //
 // Constructor argument order for SW_I2C:  (rotation, clock, data, reset)
+//                                    i.e. (rotation, SCL, SDA, reset)
 // ---------------------------------------------------------------------------
 
-// OLED 1 — hardware I2C on A4/A5
-U8G2_SSD1306_128X64_NONAME_1_HW_I2C u8g2_hw(U8G2_R0, U8X8_PIN_NONE);
+// LEFT EYE — software I2C, SCL = D4, SDA = D5
+U8G2_SH1106_128X64_NONAME_F_SW_I2C leftEye(
+  U8G2_R0, 4, 5, U8X8_PIN_NONE
+);
 
-// OLED 2 & 3 — shared software I2C object, starting on D4/D5
-U8G2_SSD1306_128X64_NONAME_1_SW_I2C u8g2_soft(U8G2_R0,
-    /* clock= */ 5, /* data= */ 4, U8X8_PIN_NONE);
+// RIGHT EYE — software I2C, SCL = D6, SDA = D7
+U8G2_SH1106_128X64_NONAME_F_SW_I2C rightEye(
+  U8G2_R0, 6, 7, U8X8_PIN_NONE
+);
+
+// MOUTH — hardware I2C, SDA = A4, SCL = A5
+U8G2_SH1106_128X64_NONAME_F_HW_I2C mouth(
+  U8G2_R0, U8X8_PIN_NONE
+);
 
 // Which panels answered begin() at boot.
-const uint8_t OLED1 = 1 << 0;
-const uint8_t OLED2 = 1 << 1;
-const uint8_t OLED3 = 1 << 2;
+const uint8_t EYE_LEFT  = 1 << 0;
+const uint8_t EYE_RIGHT = 1 << 1;
+const uint8_t MOUTH     = 1 << 2;
 uint8_t oledOk = 0;
+
+// ---------------------------------------------------------------------------
+// Face animation state
+//
+// Expressions: 0 = Happy, 1 = Normal, 2 = Surprised, 3 = Sleepy, 4 = Sad
+// ---------------------------------------------------------------------------
+
+int expression = 0;
+int look = 0;
+
+unsigned long lastBlink = 0;
+unsigned long lastExpression = 0;
+unsigned long lastLook = 0;
+
+bool blinking = false;
+unsigned long blinkStart = 0;
 
 // ---------------------------------------------------------------------------
 // Timing
@@ -148,21 +170,6 @@ void scanHardwareI2C() {
 }
 
 // ---------------------------------------------------------------------------
-// Re-point the shared software bus at a different pin pair.
-//
-// u8x8_SetPin_SW_I2C argument order: (u8x8, clock, data, reset) — the SAME
-// order as the U8G2 constructor, so clock (SCL) comes first.
-// ---------------------------------------------------------------------------
-
-void selectSoftPanel(uint8_t index) {
-  uint8_t sda = SOFT_SDA[index];
-  uint8_t scl = SOFT_SCL[index];
-  u8x8_SetPin_SW_I2C(u8g2_soft.getU8x8(), scl, sda, U8X8_PIN_NONE);
-  pinMode(scl, OUTPUT); digitalWrite(scl, HIGH);
-  pinMode(sda, OUTPUT); digitalWrite(sda, HIGH);
-}
-
-// ---------------------------------------------------------------------------
 // Motors — no Serial.print here; raw text would corrupt the JSON protocol
 // ---------------------------------------------------------------------------
 
@@ -183,91 +190,195 @@ void startHorn(uint16_t ms) {
 }
 
 // ---------------------------------------------------------------------------
-// Display rendering
+// Face rendering (eyes + mouth)
 //
-// All three use page mode (_1_ driver). Each draw call must be wrapped in
-// a firstPage()/nextPage() loop — the buffer is refilled one page at a time.
-// Never call clearBuffer() in page mode; the driver clears each page for you.
+// These use the full-buffer (F_) driver: clearBuffer() wipes the frame, the
+// shapes are drawn into RAM, then sendBuffer() pushes the whole 1 KB over I2C
+// in one transfer. Page mode is not compatible with these calls.
 // ---------------------------------------------------------------------------
 
-// OLED 1 (hardware I2C): rover status dashboard
-void renderOled1() {
-  if (!(oledOk & OLED1)) return;
-  u8g2_hw.firstPage();
-  do {
-    u8g2_hw.setFont(u8g2_font_6x10_tf);
-    u8g2_hw.drawStr(0, 8, "CyberSentinel");
-    u8g2_hw.drawLine(0, 10, 127, 10);
+// ==========================================
+// DRAW EYE
+// ==========================================
+void drawEye(U8G2 &display, int mode, int pupilOffset,
+             bool blink) {
 
-    u8g2_hw.setFont(u8g2_font_7x13B_tf);
-    u8g2_hw.drawStr(0, 28, roverState);
+  display.clearBuffer();
 
-    u8g2_hw.setFont(u8g2_font_6x10_tf);
-    char line[20];
-    snprintf_P(line, sizeof(line), PSTR("cmds:%u errs:%u"),
-               commandCount, errorCount);
-    u8g2_hw.drawStr(0, 44, line);
+  // Blink animation
+  if (blink) {
+    display.drawRBox(17, 29, 94, 7, 3);
+    display.drawRBox(27, 37, 74, 3, 1);
+    display.sendBuffer();
+    return;
+  }
 
-    snprintf_P(line, sizeof(line), PSTR("up: %lus"),
-               (millis() - bootMs) / 1000UL);
-    u8g2_hw.drawStr(0, 58, line);
-  } while (u8g2_hw.nextPage());
+  // Happy eye
+  if (mode == 0) {
+    display.drawRBox(13, 17, 102, 38, 16);
+    display.setDrawColor(0);
+    display.drawBox(13, 17, 102, 19);
+    display.setDrawColor(1);
+    display.drawRBox(28, 30, 72, 20, 9);
+    display.setDrawColor(0);
+    display.drawDisc(64 + pupilOffset, 39, 10);
+    display.setDrawColor(1);
+  }
+
+  // Normal eye
+  else if (mode == 1) {
+    display.drawRBox(13, 8, 102, 49, 17);
+    display.setDrawColor(0);
+    display.drawDisc(64 + pupilOffset, 33, 17);
+    display.setDrawColor(1);
+    display.drawDisc(64 + pupilOffset, 33, 10);
+    display.setDrawColor(0);
+    display.drawDisc(64 + pupilOffset - 4, 28, 4);
+    display.setDrawColor(1);
+  }
+
+  // Surprised eye
+  else if (mode == 2) {
+    display.drawDisc(64, 32, 27);
+    display.setDrawColor(0);
+    display.drawDisc(64 + pupilOffset, 32, 15);
+    display.setDrawColor(1);
+    display.drawDisc(64 + pupilOffset, 32, 9);
+    display.setDrawColor(0);
+    display.drawDisc(64 + pupilOffset - 4, 27, 4);
+    display.setDrawColor(1);
+  }
+
+  // Sleepy eye
+  else if (mode == 3) {
+    display.drawRBox(13, 17, 102, 40, 16);
+    display.setDrawColor(0);
+    display.drawBox(13, 17, 102, 22);
+    display.drawDisc(64 + pupilOffset, 40, 13);
+    display.setDrawColor(1);
+    display.drawLine(13, 38, 115, 38);
+  }
+
+  // Sad eye
+  else if (mode == 4) {
+    display.drawRBox(13, 17, 102, 40, 15);
+    display.setDrawColor(0);
+    display.drawDisc(64 + pupilOffset, 40, 12);
+    display.setDrawColor(1);
+    display.drawLine(13, 17, 40, 28);
+    display.drawLine(115, 17, 88, 28);
+  }
+
+  display.sendBuffer();
 }
 
-// OLED 2 (soft I2C, D4/D5): blinking robot eye
-void renderOled2() {
-  if (!(oledOk & OLED2)) return;
-  selectSoftPanel(0);
+// ==========================================
+// DRAW MOUTH
+// ==========================================
+void drawMouth(int mode, int talkingFrame) {
 
-  // Blink: closed for 2 out of every 20 frames
-  static uint8_t tick = 0;
-  tick++;
-  bool blink = (tick % 20) < 2;
+  mouth.clearBuffer();
 
-  u8g2_soft.firstPage();
-  do {
-    u8g2_soft.setFont(u8g2_font_6x10_tf);
-    u8g2_soft.drawStr(0, 8, "Eye");
-    u8g2_soft.drawLine(0, 10, 127, 10);
+  // HAPPY SMILE
+  if (mode == 0) {
+    mouth.drawLine(25, 27, 38, 43);
+    mouth.drawLine(38, 43, 53, 51);
+    mouth.drawLine(53, 51, 75, 51);
+    mouth.drawLine(75, 51, 90, 43);
+    mouth.drawLine(90, 43, 103, 27);
 
-    if (blink) {
-      // Closed eye — a single horizontal line
-      u8g2_soft.drawLine(24, 38, 104, 38);
-    } else {
-      // Open eye: outer ellipse → iris → filled pupil
-      u8g2_soft.drawEllipse(64, 40, 38, 18, U8G2_DRAW_ALL);
-      u8g2_soft.drawEllipse(64, 40, 14, 14, U8G2_DRAW_ALL);
-      u8g2_soft.drawDisc(64, 40, 5);
-    }
+    mouth.drawLine(25, 28, 103, 28);
+  }
 
-    u8g2_soft.setFont(u8g2_font_5x7_tf);
-    char line[20];
-    if (errorCount) snprintf_P(line, sizeof(line), PSTR("warn: %u"), errorCount);
-    else            snprintf_P(line, sizeof(line), PSTR("sys: nominal"));
-    u8g2_soft.drawStr(0, 62, line);
-  } while (u8g2_soft.nextPage());
+  // NORMAL / NEUTRAL
+  else if (mode == 1) {
+    mouth.drawRBox(29, 29, 70, 8, 4);
+  }
+
+  // SURPRISED / WOW
+  else if (mode == 2) {
+    mouth.drawEllipse(64, 35, 19, 25, U8G2_DRAW_ALL);
+    mouth.drawEllipse(64, 35, 10, 16, U8G2_DRAW_ALL);
+  }
+
+  // SLEEPY
+  else if (mode == 3) {
+    mouth.drawRBox(43, 34, 42, 5, 2);
+  }
+
+  // SAD
+  else if (mode == 4) {
+    mouth.drawLine(29, 47, 45, 36);
+    mouth.drawLine(45, 36, 64, 31);
+    mouth.drawLine(64, 31, 83, 36);
+    mouth.drawLine(83, 36, 99, 47);
+  }
+
+  // Talking animation for happy expression
+  if (mode == 0 && talkingFrame == 1) {
+    mouth.drawRBox(39, 31, 50, 24, 9);
+    mouth.setDrawColor(0);
+    mouth.drawRBox(47, 34, 34, 13, 4);
+    mouth.setDrawColor(1);
+  }
+
+  // Talking animation for neutral expression
+  if (mode == 1 && talkingFrame == 1) {
+    mouth.drawRBox(35, 27, 58, 22, 8);
+    mouth.setDrawColor(0);
+    mouth.drawRBox(43, 32, 42, 10, 4);
+    mouth.setDrawColor(1);
+  }
+
+  mouth.sendBuffer();
 }
 
-// OLED 3 (soft I2C, D6/D7): log / rally screen
-void renderOled3() {
-  if (!(oledOk & OLED3)) return;
-  selectSoftPanel(1);
+// ==========================================
+// FACE ANIMATION TICK
+//
+// Called from loop(). Advances the expression / pupil / blink timers and
+// redraws all three panels. Only panels that answered begin() are touched.
+// ==========================================
+void updateFace(unsigned long now) {
 
-  u8g2_soft.firstPage();
-  do {
-    u8g2_soft.setFont(u8g2_font_6x10_tf);
-    u8g2_soft.drawStr(0, 8, "Log");
-    u8g2_soft.drawLine(0, 10, 127, 10);
+  // Change facial expression every 4 seconds
+  if (now - lastExpression >= 4000) {
+    lastExpression = now;
+    expression++;
+    if (expression > 4) expression = 0;
+  }
 
-    char line[20];
-    snprintf_P(line, sizeof(line), PSTR("cmd: %s"), lastCommand);
-    u8g2_soft.drawStr(0, 24, line);
+  // Move pupils every 900 milliseconds
+  if (now - lastLook >= 900) {
+    lastLook = now;
+    look++;
+    if (look > 2) look = 0;
+  }
 
-    snprintf_P(line, sizeof(line), PSTR("errs: %u"), errorCount);
-    u8g2_soft.drawStr(0, 38, line);
+  // Blink every 3 seconds
+  if (!blinking && now - lastBlink >= 3000) {
+    blinking = true;
+    blinkStart = now;
+    lastBlink = now;
+  }
 
-    u8g2_soft.drawStr(0, 52, lastError);
-  } while (u8g2_soft.nextPage());
+  // Keep blink brief
+  if (blinking && now - blinkStart >= 160) {
+    blinking = false;
+  }
+
+  // Pupil direction
+  int pupilOffset = 0;
+  if (look == 1) pupilOffset = 12;
+  if (look == 2) pupilOffset = -12;
+
+  // Draw both eyes
+  if (oledOk & EYE_LEFT)  drawEye(leftEye,  expression, pupilOffset, blinking);
+  if (oledOk & EYE_RIGHT) drawEye(rightEye, expression, pupilOffset, blinking);
+
+  // Animate mouth while talking
+  int talkingFrame = (now / 250) % 2;
+  if (oledOk & MOUTH) drawMouth(expression, talkingFrame);
 }
 
 // ---------------------------------------------------------------------------
@@ -343,42 +454,48 @@ void setup() {
   Wire.begin();
   scanHardwareI2C();
 
-  // OLED 1 — hardware I2C
-  if (u8g2_hw.begin()) {
-    oledOk |= OLED1;
+  // LEFT EYE — software I2C, SCL = D4, SDA = D5
+  if (leftEye.begin()) {
+    oledOk |= EYE_LEFT;
   } else {
-    reportError("oled1 fail");
+    reportError("eye L fail");
   }
+  leftEye.setI2CAddress(0x3C * 2);
+  leftEye.setBusClock(100000);
 
-  // OLED 2 — software I2C, panel 0 (D4/D5)
-  selectSoftPanel(0);
-  delay(10);
-  if (u8g2_soft.begin()) {
-    oledOk |= OLED2;
+  // RIGHT EYE — software I2C, SCL = D6, SDA = D7
+  if (rightEye.begin()) {
+    oledOk |= EYE_RIGHT;
   } else {
-    reportError("oled2 fail");
+    reportError("eye R fail");
   }
+  rightEye.setI2CAddress(0x3C * 2);
+  rightEye.setBusClock(100000);
 
-  // OLED 3 — software I2C, panel 1 (D6/D7)
-  // Re-call begin() after switching pins so the new panel gets the SSD1306
-  // initialisation sequence. The panel keeps its state in its own display RAM.
-  selectSoftPanel(1);
-  delay(10);
-  if (u8g2_soft.begin()) {
-    oledOk |= OLED3;
+  // MOUTH — hardware I2C on A4/A5
+  if (mouth.begin()) {
+    oledOk |= MOUTH;
   } else {
-    reportError("oled3 fail");
+    reportError("mouth fail");
   }
+  // I2C address 0x3C (default for many OLEDs)
+  mouth.setI2CAddress(0x3C * 2);
+  mouth.setBusClock(100000);
 
   lastHeartbeat = millis();
   lastDisplay   = millis();
 
   char boot[20];
-  snprintf_P(boot, sizeof(boot), PSTR("oleds %c%c%c"),
-             (oledOk & OLED1) ? '1' : '-',
-             (oledOk & OLED2) ? '2' : '-',
-             (oledOk & OLED3) ? '3' : '-');
+  snprintf_P(boot, sizeof(boot), PSTR("oled L%c R%c M%c"),
+             (oledOk & EYE_LEFT)  ? '1' : '-',
+             (oledOk & EYE_RIGHT) ? '1' : '-',
+             (oledOk & MOUTH)     ? '1' : '-');
   sendLog("info", boot);
+
+  // First frame: neutral eyes, neutral mouth
+  drawEye(leftEye, 1, 0, false);
+  drawEye(rightEye, 1, 0, false);
+  drawMouth(1, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -403,15 +520,11 @@ void loop() {
     sendHeartbeat();
   }
 
-  // 4. Display refresh every 250 ms.
-  //    OLED 1 (hardware bus) on every tick.
-  //    OLED 2 and OLED 3 alternate so the soft bus is not hammered.
+  // 4. Face refresh every 250 ms.
+  //    Both eyes (software I2C) plus the mouth (hardware I2C) redraw in one
+  //    tick. If the soft bus starves pollSerial(), raise DISPLAY_MS.
   if (now - lastDisplay >= DISPLAY_MS) {
     lastDisplay = now;
-    renderOled1();
-    static bool oddTick = false;
-    oddTick = !oddTick;
-    if (oddTick) renderOled2();
-    else         renderOled3();
+    updateFace(now);
   }
 }
