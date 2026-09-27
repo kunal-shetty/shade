@@ -114,8 +114,21 @@ fi
 # Ask the firmware what it can actually see, so a loose ribbon is caught now.
 CAM_BIN="$(command -v rpicam-hello || command -v libcamera-hello || true)"
 if [[ -n "${CAM_BIN}" ]]; then
-  CAM_LIST="$("${CAM_BIN}" --list-cameras 2>/dev/null || true)"
-  if [[ -n "${CAM_LIST}" ]] && grep -qi 'available cameras' <<<"${CAM_LIST}"; then
+  # The timeout is essential, not defensive padding. This probe talks to libcamera
+  # on the real sensor, and on a busy, half-seated or misbehaving module it can
+  # block indefinitely — which would wedge the whole provisioning run at a step
+  # that is only advisory. Provisioning must never hang on an optional check.
+  CAM_LIST="$(timeout 15 "${CAM_BIN}" --list-cameras 2>/dev/null)"
+  CAM_RC=$?
+  if [[ ${CAM_RC} -eq 124 ]]; then
+    warn "${CAM_BIN} --list-cameras did not finish within 15s and was stopped."
+    warn "  Most often the sensor is simply held by the gateway that is already"
+    warn "  running, but a half-seated ribbon blocks it the same way. This probe is"
+    warn "  optional — the gateway opens the sensor itself — so provisioning continues."
+    warn "  Re-check later with nothing holding the camera:"
+    warn "    sudo systemctl stop cybersentinel-gateway"
+    warn "    timeout 15 ${CAM_BIN} --list-cameras"
+  elif [[ -n "${CAM_LIST}" ]] && grep -qi 'available cameras' <<<"${CAM_LIST}"; then
     log "CSI camera reported by the firmware:"
     grep -iA2 'available cameras' <<<"${CAM_LIST}" | sed 's/^/      /'
   else
@@ -295,17 +308,24 @@ python3 -m venv --system-site-packages "${INSTALL_DIR}/venv" \
 # Fail loudly rather than silently losing the camera backend. The distinction
 # matters: an import that works but finds zero sensors is a wiring problem, not
 # a Python one, and the two need completely different fixes.
-if PICAM_COUNT="$("${INSTALL_DIR}/venv/bin/python" \
-      -c 'from picamera2 import Picamera2 as P; print(len(P.global_camera_info()))' 2>&1)"; then
-  if [[ "${PICAM_COUNT}" == "0" ]]; then
-    warn "picamera2 imports from the venv but sees 0 CSI cameras."
-    warn "  Check the ribbon (CAM/DISP 0, contacts facing the board) and reboot."
-  else
-    log "picamera2 sees ${PICAM_COUNT} CSI camera(s) from the venv"
-  fi
-else
+#
+# Started up with a timeout for the same reason as the probe above: importing
+# picamera2 initialises libcamera, which touches the sensor and can block.
+PICAM_COUNT="$(timeout 20 "${INSTALL_DIR}/venv/bin/python" \
+  -c 'from picamera2 import Picamera2 as P; print(len(P.global_camera_info()))' 2>&1)"
+PICAM_RC=$?
+if [[ ${PICAM_RC} -eq 124 ]]; then
+  warn "picamera2 took longer than 20s to enumerate cameras and was stopped."
+  warn "  The gateway will still try the sensor on its own; if the app shows no"
+  warn "  camera, check:  ${CAM_BIN:-rpicam-hello} --list-cameras"
+elif [[ ${PICAM_RC} -ne 0 ]]; then
   warn "picamera2 is not importable from the venv: ${PICAM_COUNT}"
   warn "  apt-get install -y python3-picamera2   (then re-run this script)"
+elif [[ "${PICAM_COUNT}" == "0" ]]; then
+  warn "picamera2 imports from the venv but sees 0 CSI cameras."
+  warn "  Check the ribbon (CAM/DISP 0, contacts facing the board) and reboot."
+else
+  log "picamera2 sees ${PICAM_COUNT} CSI camera(s) from the venv"
 fi
 
 chown -R "${RUN_USER}:${RUN_USER}" "${INSTALL_DIR}"
