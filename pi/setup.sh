@@ -194,6 +194,11 @@ MOSQ_BIN="$(command -v mosquitto || true)"
 
 # `timeout` returns 124 when the broker kept running, which means the config
 # was accepted. Any other non-zero code means Mosquitto rejected it.
+# Exit code of the last run_mosquitto_check, so the caller can report it. The
+# number separates "bad config" from "could not bind", which look identical when
+# mosquitto's own logging is pointed at a file instead of stderr.
+LAST_MOSQ_CODE=0
+
 run_mosquitto_check() {
   local conf="$1" out
   out="$(mktemp)"
@@ -201,9 +206,11 @@ run_mosquitto_check() {
   local code=$?
   if [[ ${code} -ne 0 && ${code} -ne 124 ]]; then
     cat "${out}" >&2
+    LAST_MOSQ_CODE=${code}
     rm -f "${out}"
     return 1
   fi
+  LAST_MOSQ_CODE=0
   rm -f "${out}"
   return 0
 }
@@ -224,6 +231,17 @@ configure_mosquitto() {
   install -d /etc/mosquitto/conf.d
   local target=/etc/mosquitto/conf.d/cybersentinel.conf
 
+  # Stop any running broker BEFORE validating. The validation starts a throwaway
+  # mosquitto, and a already-running one holds 1883, so the bind fails and looks
+  # exactly like a rejected config file. That made a re-run — which is the whole
+  # point of an idempotent script — report a config error on a config that is
+  # perfectly fine, then install the degraded fallback.
+  if systemctl is-active --quiet mosquitto 2>/dev/null; then
+    log "Stopping mosquitto so the config can be validated"
+    systemctl stop mosquitto >/dev/null 2>&1 || true
+    sleep 1
+  fi
+
   if websockets_supported; then
     log "Mosquitto supports WebSockets — installing 1883 TCP + 9001 WebSocket listeners"
     install -m 644 "${REPO_DIR}/pi/mosquitto.conf" "${target}"
@@ -241,9 +259,13 @@ configure_mosquitto() {
 
   log "Validating the merged Mosquitto configuration"
   if ! run_mosquitto_check /etc/mosquitto/mosquitto.conf; then
-    warn "Mosquitto rejected /etc/mosquitto/mosquitto.conf (output above)."
-    warn "Running with a standalone config so the broker still starts..."
-    install -m 644 "${target}" /etc/mosquitto/conf.d/cybersentinel.conf
+    warn "Mosquitto rejected /etc/mosquitto/mosquitto.conf (exit ${LAST_MOSQ_CODE}, output above)."
+    warn "Every file in /etc/mosquitto/conf.d/ is merged into that config, and a stale"
+    warn "one from an earlier attempt can redeclare the same listeners. Check both:"
+    ss -ltnp 2>/dev/null | grep -E ':(1883|9001)[[:space:]]' >&2 || warn "  (nothing listening on 1883/9001)"
+    ls -l /etc/mosquitto/conf.d/ >&2 || true
+    warn "Remove any file there you did not expect, then re-run:"
+    warn "  sudo rm /etc/mosquitto/conf.d/<stale>.conf && sudo bash pi/setup.sh"
     return 1
   fi
 
@@ -311,22 +333,35 @@ python3 -m venv --system-site-packages "${INSTALL_DIR}/venv" \
 #
 # Started up with a timeout for the same reason as the probe above: importing
 # picamera2 initialises libcamera, which touches the sensor and can block.
-PICAM_COUNT="$(timeout 20 "${INSTALL_DIR}/venv/bin/python" \
-  -c 'from picamera2 import Picamera2 as P; print(len(P.global_camera_info()))' 2>&1)"
+# stderr goes to its own file, NOT merged into stdout. libcamera logs several
+# INFO lines while enumerating, and folding them into the value made the count
+# unparsable — every comparison against "0" failed and the whole log blob was
+# printed as the sensor count.
+PICAM_LOG="$(mktemp)"
+PICAM_INFO="$(timeout 20 "${INSTALL_DIR}/venv/bin/python" \
+  -c 'from picamera2 import Picamera2 as P
+info = P.global_camera_info()
+print(len(info))
+print(", ".join(str(c.get("Model") or c.get("model") or "?") for c in info))' \
+  2>"${PICAM_LOG}")"
 PICAM_RC=$?
+PICAM_COUNT="$(sed -n 1p <<<"${PICAM_INFO}")"
+PICAM_MODELS="$(sed -n 2p <<<"${PICAM_INFO}")"
 if [[ ${PICAM_RC} -eq 124 ]]; then
   warn "picamera2 took longer than 20s to enumerate cameras and was stopped."
   warn "  The gateway will still try the sensor on its own; if the app shows no"
   warn "  camera, check:  ${CAM_BIN:-rpicam-hello} --list-cameras"
 elif [[ ${PICAM_RC} -ne 0 ]]; then
-  warn "picamera2 is not importable from the venv: ${PICAM_COUNT}"
+  warn "picamera2 is not importable from the venv (exit ${PICAM_RC}):"
+  sed 's/^/      /' "${PICAM_LOG}" >&2 || true
   warn "  apt-get install -y python3-picamera2   (then re-run this script)"
 elif [[ "${PICAM_COUNT}" == "0" ]]; then
   warn "picamera2 imports from the venv but sees 0 CSI cameras."
   warn "  Check the ribbon (CAM/DISP 0, contacts facing the board) and reboot."
 else
-  log "picamera2 sees ${PICAM_COUNT} CSI camera(s) from the venv"
+  log "picamera2 sees ${PICAM_COUNT} CSI camera(s) from the venv: ${PICAM_MODELS}"
 fi
+rm -f "${PICAM_LOG}"
 
 chown -R "${RUN_USER}:${RUN_USER}" "${INSTALL_DIR}"
 
@@ -430,6 +465,28 @@ free_gateway_ports
 
 if systemctl enable --now cybersentinel-gateway; then
   log "cybersentinel-gateway is running"
+
+  # `enable --now` only proves systemd LAUNCHED the unit. With Restart=always a
+  # gateway that crashes on startup is still reported as started here and then
+  # loops forever, so the bound port is the real evidence that it came up. The
+  # journal is dumped on failure because that is where the traceback lives.
+  GW_BOUND=0
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    if ss -ltn 2>/dev/null | grep -qE "[:.]${API_PORT}[[:space:]]"; then
+      GW_BOUND=1
+      break
+    fi
+    sleep 1
+  done
+  if [[ ${GW_BOUND} -eq 1 ]]; then
+    log "Gateway is listening on :${API_PORT}"
+  else
+    warn "The gateway did not bind :${API_PORT} within 10s — it is crash-looping."
+    warn "Its own log lines, which name the reason:"
+    journalctl -u cybersentinel-gateway -n 40 --no-pager >&2 || true
+    warn "Run it in the foreground to see the full traceback:"
+    warn "  sudo -u ${RUN_USER} /opt/cybersentinel/venv/bin/python /opt/cybersentinel/gateway.py"
+  fi
 else
   warn "cybersentinel-gateway failed to start:"
   journalctl -u cybersentinel-gateway -n 25 --no-pager >&2 || true
@@ -677,11 +734,13 @@ cat <<EOF
     ${INSTALL_DIR}/venv/bin/python -c 'from picamera2 import Picamera2; print(Picamera2.global_camera_info())'
 
   Motor check:
-    This script has already sent PING and STOP through the control socket above,
-    which is the same path the app's joystick and direction buttons take, and has
-    confirmed the gateway process holds the dialout group. If the app connects but
-    the rover still will not move, the fault is past the gateway: check the
-    Arduino's USB cable and motor driver, and watch the sketch's own log:
+    Control does not go over MQTT: the app opens the control socket above and
+    sends MOVE / STOP / BUZZER. Two checks earlier in this run are what matter -
+    whether that socket answered, and whether the gateway process holds the
+    dialout group it needs to open the Arduino. Go by those results, not by this
+    text. If both passed and the app still cannot move the rover, the fault is
+    past the gateway: check the Arduino's USB cable and motor driver, and watch
+    the sketch's own log:
       journalctl -u cybersentinel-gateway -f | grep '\[arduino'
     The app's Horn button is an audible end-to-end test (gateway -> serial ->
     Arduino buzzer) that needs no tools at all.
