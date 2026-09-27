@@ -257,6 +257,18 @@ mkdir -p "${INSTALL_DIR}"
 install -m 644 "${REPO_DIR}/gateway.py" "${INSTALL_DIR}/gateway.py"
 [[ -f "${INSTALL_DIR}/gateway.env" ]] || install -m 644 "${REPO_DIR}/pi/gateway.env.example" "${INSTALL_DIR}/gateway.env"
 
+# Every port below is read from the DEPLOYED env file, so the checks in this
+# script can never drift from the numbers the gateway actually binds.
+read_env_port() {
+  local key="$1" fallback="$2" value
+  value="$(grep -E "^${key}=" "${INSTALL_DIR}/gateway.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+  printf '%s' "${value:-${fallback}}"
+}
+API_PORT="$(read_env_port CS_API_PORT 8000)"
+GW_WS_PORT="$(read_env_port CS_WS_PORT 8765)"
+GW_CAM_PORT="$(read_env_port CS_CAMERA_PORT 8080)"
+GW_PORTS=("${API_PORT}" "${GW_WS_PORT}" "${GW_CAM_PORT}")
+
 # Make it obvious which build landed on disk — a stale clone deploys a stale gateway.
 DEPLOYED_VERSION="$(grep -oE 'GATEWAY_VERSION = "[^"]+"' "${INSTALL_DIR}/gateway.py" | head -1 | cut -d'"' -f2)"
 if [[ -z "${DEPLOYED_VERSION}" ]]; then
@@ -302,6 +314,100 @@ log "Installing systemd service"
 sed "s/^User=pi$/User=${RUN_USER}/" "${REPO_DIR}/pi/cybersentinel-gateway.service" \
   > /etc/systemd/system/cybersentinel-gateway.service
 systemctl daemon-reload
+
+# ---------------------------------------------------------------------------
+# Free the gateway's ports before the unit starts
+#
+# ${GW_PORTS[*]} belong to the gateway (REST, control WebSocket, MJPEG camera).
+# If an earlier build is still running — classically a gateway started by hand
+# during debugging and never stopped — systemd's restart cannot bind, and every
+# check afterwards is answered by the OLD process. That failure is invisible in
+# `systemctl status`, which cheerfully reports the new unit as enabled while the
+# stale process keeps serving the old code forever.
+#
+# Only processes that are recognisably OURS are killed. 8000, 8080 and 8765 are
+# all popular ports for unrelated software, and taking one of those down would be
+# far worse than a port clash, so anything else is reported instead.
+# ---------------------------------------------------------------------------
+# True only for a process that is genuinely still running. `kill -0` also
+# succeeds for a zombie waiting to be reaped, which would make this report a
+# successfully killed gateway as "STILL alive".
+proc_alive() {
+  local pid="$1" state
+  [[ -d "/proc/${pid}" ]] || return 1
+  state="$(awk '/^State:/{print $2}' "/proc/${pid}/status" 2>/dev/null || true)"
+  [[ -n "${state}" && "${state}" != "Z" ]]
+}
+
+port_owner_pids() {
+  local port="$1"
+  # `ss -ltnp` is the only listing that names the owning pid. It needs root,
+  # which this script already is; without root the pid column is absent and this
+  # correctly finds nothing.
+  ss -ltnp 2>/dev/null \
+    | grep -E "[:.]${port}[[:space:]]" \
+    | grep -oE 'pid=[0-9]+' \
+    | cut -d= -f2 \
+    | sort -u
+}
+
+free_gateway_ports() {
+  local port pid cmd cwd freed=0 blocked=0
+
+  # Stop the unit first: Restart=always would otherwise race us and re-take the
+  # ports while we are still trying to clear them.
+  if systemctl is-active --quiet cybersentinel-gateway 2>/dev/null; then
+    log "Stopping cybersentinel-gateway so it releases ${GW_PORTS[*]}"
+    systemctl stop cybersentinel-gateway >/dev/null 2>&1 || true
+    sleep 1
+  fi
+
+  for port in "${GW_PORTS[@]}"; do
+    for pid in $(port_owner_pids "${port}"); do
+      [[ -n "${pid}" ]] || continue
+      cmd="$(tr '\0' ' ' < "/proc/${pid}/cmdline" 2>/dev/null || true)"
+      cwd="$(readlink -f "/proc/${pid}/cwd" 2>/dev/null || true)"
+
+      if [[ "${cmd}" == *gateway.py* || "${cmd}" == *cybersentinel* || "${cwd}" == *cybersentinel* ]]; then
+        warn "Port ${port} was still held by a leftover gateway (pid ${pid}): ${cmd:-unknown}"
+        kill "${pid}" 2>/dev/null || true
+        # Give it a moment to exit on SIGTERM before escalating.
+        for _ in 1 2 3 4 5; do
+          proc_alive "${pid}" || break
+          sleep 1
+        done
+        if proc_alive "${pid}"; then
+          kill -9 "${pid}" 2>/dev/null || true
+          warn "  pid ${pid} ignored SIGTERM and was killed with SIGKILL"
+        fi
+        if proc_alive "${pid}"; then
+          warn "  pid ${pid} is STILL alive — free port ${port} yourself: sudo kill -9 ${pid}"
+          blocked=$((blocked + 1))
+        else
+          log "Freed port ${port} (stale gateway pid ${pid})"
+          freed=$((freed + 1))
+        fi
+      else
+        warn "Port ${port} is held by pid ${pid}, which does NOT look like the rover gateway:"
+        warn "    ${cmd:-unknown command}"
+        if [[ -n "${cwd}" ]]; then
+          warn "    running from: ${cwd}"
+        fi
+        warn "  Left alone on purpose. To hand the port to the gateway:  sudo kill ${pid}"
+        blocked=$((blocked + 1))
+      fi
+    done
+  done
+
+  if [[ ${freed} -eq 0 && ${blocked} -eq 0 ]]; then
+    log "Ports ${GW_PORTS[*]} are free"
+  elif [[ ${blocked} -gt 0 ]]; then
+    warn "${blocked} port(s) are still occupied — the gateway may not be able to bind them."
+  fi
+}
+
+free_gateway_ports
+
 if systemctl enable --now cybersentinel-gateway; then
   log "cybersentinel-gateway is running"
 else
@@ -328,9 +434,6 @@ done
 # ---------------------------------------------------------------------------
 # Verification — prove the running gateway is the build we just installed
 # ---------------------------------------------------------------------------
-API_PORT="$(grep -E '^CS_API_PORT=' "${INSTALL_DIR}/gateway.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
-API_PORT="${API_PORT:-8000}"
-
 log "Verifying the gateway on port ${API_PORT}"
 sleep 2
 HEALTH="$(curl -fsS --max-time 6 "http://127.0.0.1:${API_PORT}/health" 2>/dev/null || true)"
@@ -418,8 +521,7 @@ fi
 # JPEG is fetched here rather than assumed. The supervisor retries every few
 # seconds, so this waits rather than failing on a slow first start.
 # ---------------------------------------------------------------------------
-CAM_PORT="$(grep -E '^CS_CAMERA_PORT=' "${INSTALL_DIR}/gateway.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
-CAM_PORT="${CAM_PORT:-8080}"
+CAM_PORT="${GW_CAM_PORT}"
 
 log "Checking the camera stream on :${CAM_PORT}"
 CAM_STATUS="$(curl -fsS --max-time 6 "http://127.0.0.1:${API_PORT}/camera/status" 2>/dev/null || true)"
@@ -475,8 +577,7 @@ rm -f "${FRAME_TMP}"
 # bound the port, and a service user that cannot open the serial port — before
 # they surface as an app that connects fine but never moves the rover.
 # ---------------------------------------------------------------------------
-WS_PORT="$(grep -E '^CS_WS_PORT=' "${INSTALL_DIR}/gateway.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
-WS_PORT="${WS_PORT:-8765}"
+WS_PORT="${GW_WS_PORT}"
 
 log "Checking the control socket on :${WS_PORT}"
 if ! ss -ltn 2>/dev/null | grep -qE "[:.]${WS_PORT}[[:space:]]"; then
