@@ -19,6 +19,7 @@ RUN_USER="${SUDO_USER:-pi}"
 HOSTNAME_TARGET="cybersentinel"
 MOSQ_WS_CHECK_PORT=19001
 CAMERA_NEEDS_REBOOT=0
+CAMERA_PKG_MISSING=0
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[!]\033[0m %s\n' "$*" >&2; }
@@ -39,8 +40,30 @@ apt-get install -y python3-venv python3-pip \
   mosquitto mosquitto-clients \
   avahi-daemon libnss-mdns \
   espeak-ng alsa-utils \
-  ffmpeg v4l-utils \
-  python3-picamera2 || die "apt-get install failed"
+  ffmpeg v4l-utils || die "apt-get install failed (core packages)"
+
+# ---------------------------------------------------------------------------
+# CSI camera stack (Picamera2)
+#
+# Deliberately NOT in the block above. python3-picamera2 is tied to a matching
+# libcamera build, so on an older or a newer Raspberry Pi OS release it can be
+# missing or held back by a dependency. Letting that one package abort the run
+# used to leave a Pi with no broker, no gateway and no motors — a far worse
+# outcome than a camera that needs a second look. So: core packages are fatal,
+# the camera package is loud but survivable.
+# ---------------------------------------------------------------------------
+log "Installing the CSI camera stack (python3-picamera2)"
+if dpkg -s python3-picamera2 >/dev/null 2>&1; then
+  log "python3-picamera2 is already installed"
+elif apt-get install -y python3-picamera2; then
+  log "python3-picamera2 installed"
+else
+  CAMERA_PKG_MISSING=1
+  warn "Could not install python3-picamera2 — the CSI camera cannot stream without it."
+  warn "  It ships with Raspberry Pi OS Bookworm (64-bit); check availability with:"
+  warn "    apt-cache policy python3-picamera2"
+  warn "  Fix the apt source or the OS release, then re-run:  sudo bash pi/setup.sh"
+fi
 
 # Optional: the libcamera CLI, for eyeballing the CSI camera outside our code.
 # It is the only way to test the ribbon camera without the gateway.
@@ -386,14 +409,139 @@ PY
 fi
 
 # ---------------------------------------------------------------------------
+# Camera stream — the app needs frames, not just a configured camera
+#
+# The gateway serves the MJPEG stream itself on CS_CAMERA_PORT (8080), which is
+# the port and path the phone already asks for, so the capture backend can
+# change without touching the app. "The camera is configured" and "the camera is
+# streaming" are different states and only the second one is useful, so a real
+# JPEG is fetched here rather than assumed. The supervisor retries every few
+# seconds, so this waits rather than failing on a slow first start.
+# ---------------------------------------------------------------------------
+CAM_PORT="$(grep -E '^CS_CAMERA_PORT=' "${INSTALL_DIR}/gateway.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+CAM_PORT="${CAM_PORT:-8080}"
+
+log "Checking the camera stream on :${CAM_PORT}"
+CAM_STATUS="$(curl -fsS --max-time 6 "http://127.0.0.1:${API_PORT}/camera/status" 2>/dev/null || true)"
+if [[ -z "${CAM_STATUS}" ]]; then
+  warn "No answer from /camera/status — the gateway may still be starting up."
+else
+  CAM_FIELDS="$(python3 -c '
+import json, sys
+d = json.loads(sys.argv[1])
+print("online" if d.get("online") else "offline")
+print(d.get("source") or "?")
+print(d.get("detail") or "")
+' "${CAM_STATUS}" 2>/dev/null || true)"
+  CAM_ONLINE="$(sed -n 1p <<<"${CAM_FIELDS}")"
+  CAM_SOURCE="$(sed -n 2p <<<"${CAM_FIELDS}")"
+  CAM_DETAIL="$(sed -n 3p <<<"${CAM_FIELDS}")"
+  CAM_MARK="[--]"
+  if [[ "${CAM_ONLINE}" == "online" ]]; then CAM_MARK="[ok]"; fi
+  printf '    %s camera  : %s [%s] - %s\n' \
+    "${CAM_MARK}" "${CAM_ONLINE:-unknown}" "${CAM_SOURCE:-?}" "${CAM_DETAIL:-no detail}"
+fi
+
+FRAME_TMP="$(mktemp)"
+CAM_FRAME_OK=0
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  if curl -fsS --max-time 5 "http://127.0.0.1:${CAM_PORT}/snapshot.jpg" \
+       -o "${FRAME_TMP}" 2>/dev/null && [[ -s "${FRAME_TMP}" ]]; then
+    CAM_FRAME_OK=1
+    break
+  fi
+  sleep 1
+done
+if [[ "${CAM_FRAME_OK}" -eq 1 ]]; then
+  log "Camera is serving frames (:${CAM_PORT}, $(wc -c <"${FRAME_TMP}" | tr -d ' ') byte JPEG)"
+else
+  warn "No frame from http://127.0.0.1:${CAM_PORT}/snapshot.jpg after 10 seconds."
+  warn "  What does the gateway think?"
+  warn "    curl -s http://127.0.0.1:${API_PORT}/camera/status | python3 -m json.tool"
+  warn "  Does the sensor work below our code?"
+  warn "    ${CAM_BIN:-rpicam-hello} --list-cameras"
+  warn "  Ribbon seated in CAM/DISP 0 with the metal contacts facing the board, and"
+  warn "  reboot if camera_auto_detect was only just enabled."
+fi
+rm -f "${FRAME_TMP}"
+
+# ---------------------------------------------------------------------------
+# Control channel — the exact socket the app's joystick and buttons use
+#
+# Motor control does NOT go over MQTT: the app opens ws://<pi>:<CS_WS_PORT> and
+# sends {cmd:MOVE,angle,speed} / STOP / BUZZER, and the gateway turns that into
+# the FORWARD / BACKWARD / LEFT / RIGHT / STOP line the Arduino understands.
+# Checking that socket here catches the two silent killers — a gateway that never
+# bound the port, and a service user that cannot open the serial port — before
+# they surface as an app that connects fine but never moves the rover.
+# ---------------------------------------------------------------------------
+WS_PORT="$(grep -E '^CS_WS_PORT=' "${INSTALL_DIR}/gateway.env" 2>/dev/null | cut -d= -f2 | tr -d '[:space:]')"
+WS_PORT="${WS_PORT:-8765}"
+
+log "Checking the control socket on :${WS_PORT}"
+if ! ss -ltn 2>/dev/null | grep -qE "[:.]${WS_PORT}[[:space:]]"; then
+  warn "Nothing is listening on :${WS_PORT} — the app will not be able to drive the rover."
+  warn "  journalctl -u cybersentinel-gateway -n 40 --no-pager | grep '\\[ws'"
+else
+  "${INSTALL_DIR}/venv/bin/python" - "${WS_PORT}" <<'PY'
+import asyncio, json, sys
+
+try:
+    import websockets
+except ImportError as exc:
+    print(f"    [!!] control socket: websockets missing from the venv ({exc})")
+    sys.exit(0)
+
+
+async def check(port: int) -> None:
+    async with websockets.connect(f"ws://127.0.0.1:{port}", open_timeout=5) as ws:
+        await ws.send(json.dumps({"cmd": "PING"}))
+        pong = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        print(f"    [ok] control socket / PING -> {pong.get('type')}")
+
+        # STOP is the one command that is safe to send unattended: it moves
+        # nothing, but it does travel the whole gateway -> serial -> Arduino
+        # path that the app's joystick uses.
+        await ws.send(json.dumps({"cmd": "STOP"}))
+        ack = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+        print(f"    [ok] control socket / STOP -> {ack.get('type')}")
+
+
+try:
+    asyncio.run(check(int(sys.argv[1])))
+except Exception as exc:
+    print(f"    [!!] control socket did not answer: {exc}")
+PY
+fi
+
+# dialout is what lets the gateway open /dev/ttyACM0 at all. A user added to it
+# keeps the OLD group list in any process that started before the change, so this
+# inspects the running service rather than trusting /etc/group.
+SVC_PID="$(systemctl show -p MainPID --value cybersentinel-gateway 2>/dev/null || true)"
+if [[ -n "${SVC_PID}" && "${SVC_PID}" != "0" ]]; then
+  DIALOUT_GID="$(getent group dialout | cut -d: -f3 || true)"
+  if [[ -n "${DIALOUT_GID}" ]] \
+     && awk -v gid="${DIALOUT_GID}" '$1 == "Groups:" { for (i = 2; i <= NF; i++) if ($i == gid) found = 1 } END { exit !found }' \
+          "/proc/${SVC_PID}/status" 2>/dev/null; then
+    log "The gateway process can reach the Arduino (dialout ${DIALOUT_GID} present)"
+  else
+    warn "The running gateway does NOT hold the dialout group, so it cannot open the"
+    warn "Arduino's serial port and the rover will not move. Apply it with:"
+    warn "  sudo systemctl restart cybersentinel-gateway    (or reboot, which is the"
+    warn "  only way to refresh the group list of a login session)"
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 IP="$(hostname -I | awk '{print $1}')"
 cat <<EOF
 
   Gateway:   http://${HOSTNAME_TARGET}.local:${API_PORT}/health   (IP ${IP})
-  WebSocket: ws://${HOSTNAME_TARGET}.local:8765
-  MQTT/WS:   ws://${HOSTNAME_TARGET}.local:9001
+  Camera:    http://${HOSTNAME_TARGET}.local:${CAM_PORT}/stream.mjpg
+  Controls:  ws://${HOSTNAME_TARGET}.local:${WS_PORT}   (the app's joystick + buttons)
+  MQTT/WS:   ws://${HOSTNAME_TARGET}.local:9001   (live telemetry)
   Logs:      journalctl -u cybersentinel-gateway -f
              journalctl -u mosquitto -f
 
@@ -403,10 +551,31 @@ cat <<EOF
     speaker-test -t sine -f 440 -l 1
     espeak-ng "CyberSentinel online"
 
+  Camera check:
+    curl -s "http://127.0.0.1:${CAM_PORT}/snapshot.jpg" -o shot.jpg && ls -lh shot.jpg
+    ${INSTALL_DIR}/venv/bin/python -c 'from picamera2 import Picamera2; print(Picamera2.global_camera_info())'
+
+  Motor check:
+    This script has already sent PING and STOP through the control socket above,
+    which is the same path the app's joystick and direction buttons take, and has
+    confirmed the gateway process holds the dialout group. If the app connects but
+    the rover still will not move, the fault is past the gateway: check the
+    Arduino's USB cable and motor driver, and watch the sketch's own log:
+      journalctl -u cybersentinel-gateway -f | grep '\[arduino'
+    The app's Horn button is an audible end-to-end test (gateway -> serial ->
+    Arduino buzzer) that needs no tools at all.
+
   Arduino check:
     curl -s http://127.0.0.1:${API_PORT}/health | grep -o '"serial":[^}]*}'
     journalctl -u cybersentinel-gateway -f | grep '\[arduino'
 EOF
+
+if [[ "${CAMERA_PKG_MISSING}" -eq 1 ]]; then
+  warn "The CSI camera stack is NOT installed, so the app's camera view will stay blank."
+  warn "  apt-cache policy python3-picamera2"
+  warn "  sudo apt-get update && sudo apt-get install -y python3-picamera2"
+  warn "  sudo bash pi/setup.sh"
+fi
 
 if [[ "${CAMERA_NEEDS_REBOOT}" -eq 1 ]]; then
   warn "camera_auto_detect was just enabled — reboot before the CSI camera will appear:"
