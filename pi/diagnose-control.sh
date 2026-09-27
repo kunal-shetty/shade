@@ -344,7 +344,7 @@ fi
 # ---------------------------------------------------------------------------
 hop "What you should put in the app (Settings -> Connection)"
 # ---------------------------------------------------------------------------
-printf '    host          %s   (or the mDNS name %s)\n' "${LAN_IP:-<pi-ip>}" "$MDNS_NAME"
+printf '    host          %s   (enter this IP; Android does NOT resolve the mDNS name %s)\n' "${LAN_IP:-<pi-ip>}" "$MDNS_NAME"
 printf '    ws port       %s    (rover control)\n' "$WS_PORT"
 printf '    api port      %s    (REST / discovery probe)\n' "$API_PORT"
 printf '    mqtt port     %s    (telemetry over WebSocket)\n' "9001"
@@ -370,7 +370,9 @@ if [ "$FAILED" = 0 ]; then
 else
   echo "==> Result: the Pi side is broken. Fix the [!!] lines above, top down:"
   echo "    hop 1/4  service not up      -> journalctl -u cybersentinel-gateway -n 60 --no-pager"
-  echo "    hop 2/3  serial not connected -> usermod -aG dialout \$USER, reboot, retry"
+  echo "    hop 3    no /dev/ttyACM* / /dev/ttyUSB* -> re-seat or swap the USB cable,"
+  echo "             check the Uno's power LED, then: lsusb | grep -i arduino"
+  echo "             (only if a node exists but lacks access: usermod -aG dialout \$USER)"
   echo "    hop 5    port refused         -> binding or firewall"
   echo "    then re-run this script; it should end with 'every hop passed'."
 fi

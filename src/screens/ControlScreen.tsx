@@ -93,6 +93,7 @@ export const ControlScreen = () => {
   const [speedLimit, setSpeedLimit] = useState(60);
   const [patrolActive, setPatrolActive] = useState(false);
   const [linkError, setLinkError] = useState<string | null>(null);
+  const [staleReconnect, setStaleReconnect] = useState(false);
   const host = useSettings((s) => s.connection.host);
   const sender = useRef(createJoystickSender()).current;
 
@@ -112,6 +113,19 @@ export const ControlScreen = () => {
   useEffect(() => {
     sendRoverCommand({ cmd: 'SET_SPEED', value: speedLimit });
   }, [speedLimit]);
+
+  // A "reconnecting" that outlives ~10 s while the phone's browser CAN open
+  // http://<pi>:8000/health is the signature of a release APK blocking
+  // plain-text traffic, not of a wrong address — say so instead of leaving a
+  // generic warning on screen.
+  useEffect(() => {
+    if (wsState !== 'reconnecting') {
+      setStaleReconnect(false);
+      return;
+    }
+    const t = setTimeout(() => setStaleReconnect(true), 10_000);
+    return () => clearTimeout(t);
+  }, [wsState]);
 
   const togglePatrol = () => {
     const next = !patrolActive;
@@ -143,7 +157,9 @@ export const ControlScreen = () => {
             <Ionicons name="alert-circle" size={13} color={palette.threatCritical} />
             <Text style={[typography.caption, { color: palette.threatCritical, flex: 1, fontWeight: '700' }]}>
               {linkError ??
-                `No control link to ${host} — MOVE packets are being dropped. Set the Pi's IP address in Settings → Connection.`}
+                (staleReconnect
+                  ? `Still reconnecting to ${host}. Test on this phone's browser: http://${host}:8000/health — if JSON loads, rebuild the APK (cleartext block); if not, fix the IP in Settings.`
+                  : `No control link to ${host} — MOVE packets are being dropped. Set the Pi's IP address in Settings → Connection.`)}
             </Text>
           </View>
         ) : null}
