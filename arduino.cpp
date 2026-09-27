@@ -208,77 +208,44 @@ void startHorn(uint16_t ms) {
 // ==========================================
 // DRAW EYE
 // ==========================================
+// ==========================================
+// DRAW EYE — left panel shows  >
+//            right panel shows 
+// mode / pupilOffset kept for API compat; unused now.
+// ==========================================
 void drawEye(U8G2 &display, int mode, int pupilOffset,
-             bool blink) {
+             bool blink, bool isLeft) {
 
   display.firstPage();
   do {
 
-    // Blink animation
     if (blink) {
-      display.drawRBox(17, 29, 94, 7, 3);
-      display.drawRBox(27, 37, 74, 3, 1);
-    }
+      // Squint: three stacked horizontal lines
+      display.drawLine(20, 31, 108, 31);
+      display.drawLine(20, 32, 108, 32);
+      display.drawLine(20, 33, 108, 33);
 
-    // Happy eye
-    else if (mode == 0) {
-      display.drawRBox(13, 17, 102, 38, 16);
-      display.setDrawColor(0);
-      display.drawBox(13, 17, 102, 19);
-      display.setDrawColor(1);
-      display.drawRBox(28, 30, 72, 20, 9);
-      display.setDrawColor(0);
-      display.drawDisc(64 + pupilOffset, 39, 10);
-      display.setDrawColor(1);
-    }
+    } else if (isLeft) {
+      // > — arms open left, tip points right (toward face center)
+      for (int8_t t = 0; t < 3; t++) {
+        display.drawLine(20, 8  + t, 100 + t, 32);   // upper arm
+        display.drawLine(20, 56 - t, 100 + t, 32);   // lower arm
+      }
+      // sparkle dot floating above tip
+      display.drawDisc(82, 13, 2);
 
-    // Normal eye
-    else if (mode == 1) {
-      display.drawRBox(13, 8, 102, 49, 17);
-      display.setDrawColor(0);
-      display.drawDisc(64 + pupilOffset, 33, 17);
-      display.setDrawColor(1);
-      display.drawDisc(64 + pupilOffset, 33, 10);
-      display.setDrawColor(0);
-      display.drawDisc(64 + pupilOffset - 4, 28, 4);
-      display.setDrawColor(1);
-    }
-
-    // Surprised eye
-    else if (mode == 2) {
-      display.drawDisc(64, 32, 27);
-      display.setDrawColor(0);
-      display.drawDisc(64 + pupilOffset, 32, 15);
-      display.setDrawColor(1);
-      display.drawDisc(64 + pupilOffset, 32, 9);
-      display.setDrawColor(0);
-      display.drawDisc(64 + pupilOffset - 4, 27, 4);
-      display.setDrawColor(1);
-    }
-
-    // Sleepy eye
-    else if (mode == 3) {
-      display.drawRBox(13, 17, 102, 40, 16);
-      display.setDrawColor(0);
-      display.drawBox(13, 17, 102, 22);
-      display.drawDisc(64 + pupilOffset, 40, 13);
-      display.setDrawColor(1);
-      display.drawLine(13, 38, 115, 38);
-    }
-
-    // Sad eye
-    else if (mode == 4) {
-      display.drawRBox(13, 17, 102, 40, 15);
-      display.setDrawColor(0);
-      display.drawDisc(64 + pupilOffset, 40, 12);
-      display.setDrawColor(1);
-      display.drawLine(13, 17, 40, 28);
-      display.drawLine(115, 17, 88, 28);
+    } else {
+      // < — arms open right, tip points left (toward face center)
+      for (int8_t t = 0; t < 3; t++) {
+        display.drawLine(108, 8  + t, 28 - t, 32);   // upper arm
+        display.drawLine(108, 56 - t, 28 - t, 32);   // lower arm
+      }
+      // sparkle dot floating above tip
+      display.drawDisc(46, 13, 2);
     }
 
   } while (display.nextPage());
 }
-
 // ==========================================
 // DRAW MOUTH
 // ==========================================
@@ -381,8 +348,8 @@ void updateFace(unsigned long now) {
   if (look == 2) pupilOffset = -12;
 
   // Draw both eyes
-  if (oledOk & EYE_LEFT)  drawEye(leftEye,  expression, pupilOffset, blinking);
-  if (oledOk & EYE_RIGHT) drawEye(rightEye, expression, pupilOffset, blinking);
+  if (oledOk & EYE_LEFT)  drawEye(leftEye,  expression, pupilOffset, blinking, true);
+if (oledOk & EYE_RIGHT) drawEye(rightEye, expression, pupilOffset, blinking, false);
 
   // Animate mouth while talking
   int talkingFrame = (now / 250) % 2;
