@@ -16,8 +16,8 @@
 //   Motors    IN1..IN4   D8, D9, D10, D11  (H-bridge driver)
 //   Buzzer               D12
 //   Mouth     hardware I2C   A4 = SDA, A5 = SCL   (SH1106 128x64)
-//   Left eye  software I2C   D4 = SCL, D5 = SDA   (SH1106 128x64)
-//   Right eye software I2C   D6 = SCL, D7 = SDA   (SH1106 128x64)
+//   Left eye  software I2C   D4 = SDA, D5 = SCL   (SH1106 128x64)
+//   Right eye software I2C   D6 = SDA, D7 = SCL   (SH1106 128x64)
 //
 // Memory notes:
 //   Three separate U8G2 objects, one per panel, so each eye owns its own
@@ -73,14 +73,16 @@ const uint8_t BUZZER_PIN = 12;
 // the _F_ (full buffer) variants — see the memory notes at the top.
 // ---------------------------------------------------------------------------
 
-// LEFT EYE — software I2C, SCL = D4, SDA = D5
+// LEFT EYE (OLED 2) — software I2C, SDA = D4, SCL = D5
+// NOTE the argument order: clock (SCL) comes BEFORE data (SDA), so the pins
+// read backwards compared to the usual "SDA, SCL" wiring order.
 U8G2_SH1106_128X64_NONAME_1_SW_I2C leftEye(
-  U8G2_R0, 4, 5, U8X8_PIN_NONE
+  U8G2_R0, /* clock (SCL) = */ 5, /* data (SDA) = */ 4, U8X8_PIN_NONE
 );
 
-// RIGHT EYE — software I2C, SCL = D6, SDA = D7
+// RIGHT EYE (OLED 3) — software I2C, SDA = D6, SCL = D7
 U8G2_SH1106_128X64_NONAME_1_SW_I2C rightEye(
-  U8G2_R0, 6, 7, U8X8_PIN_NONE
+  U8G2_R0, /* clock (SCL) = */ 7, /* data (SDA) = */ 6, U8X8_PIN_NONE
 );
 
 // MOUTH — hardware I2C, SDA = A4, SCL = A5
