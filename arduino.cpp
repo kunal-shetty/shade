@@ -21,11 +21,10 @@
 //
 // Memory notes:
 //   Three separate U8G2 objects, one per panel, so each eye owns its own
-//   software-I2C pin pair and the mouth stays on the hardware bus. These
-//   are the full-buffer (F_) variants, but U8g2 keeps a SINGLE static 1 KB
-//   buffer shared by every full-buffer instance — so three panels still
-//   cost only 1 KB. Each panel is fully redrawn every frame, which is what
-//   makes sharing that buffer safe.
+//   software-I2C pin pair and the mouth stays on the hardware bus. They use
+//   the page-mode (_1_) drivers, not the full-buffer (F_) ones: a full
+//   128x64 frame is 1 KB and the Uno has 2 KB in total, so three of them
+//   cannot fit alongside the U8G2 objects and the serial buffers.
 //   All format strings use PSTR() / snprintf_P() so they stay in flash.
 
 #include <Arduino.h>
@@ -69,20 +68,23 @@ const uint8_t BUZZER_PIN = 12;
 //
 // Constructor argument order for SW_I2C:  (rotation, clock, data, reset)
 //                                    i.e. (rotation, SCL, SDA, reset)
+//
+// The _1_ in the class name is the page-mode driver. Do NOT switch these to
+// the _F_ (full buffer) variants — see the memory notes at the top.
 // ---------------------------------------------------------------------------
 
 // LEFT EYE — software I2C, SCL = D4, SDA = D5
-U8G2_SH1106_128X64_NONAME_F_SW_I2C leftEye(
+U8G2_SH1106_128X64_NONAME_1_SW_I2C leftEye(
   U8G2_R0, 4, 5, U8X8_PIN_NONE
 );
 
 // RIGHT EYE — software I2C, SCL = D6, SDA = D7
-U8G2_SH1106_128X64_NONAME_F_SW_I2C rightEye(
+U8G2_SH1106_128X64_NONAME_1_SW_I2C rightEye(
   U8G2_R0, 6, 7, U8X8_PIN_NONE
 );
 
 // MOUTH — hardware I2C, SDA = A4, SCL = A5
-U8G2_SH1106_128X64_NONAME_F_HW_I2C mouth(
+U8G2_SH1106_128X64_NONAME_1_HW_I2C mouth(
   U8G2_R0, U8X8_PIN_NONE
 );
 
@@ -192,9 +194,15 @@ void startHorn(uint16_t ms) {
 // ---------------------------------------------------------------------------
 // Face rendering (eyes + mouth)
 //
-// These use the full-buffer (F_) driver: clearBuffer() wipes the frame, the
-// shapes are drawn into RAM, then sendBuffer() pushes the whole 1 KB over I2C
-// in one transfer. Page mode is not compatible with these calls.
+// Page mode (_1_ driver). A full 128x64 framebuffer would be 1 KB per panel
+// and the Uno only has 2 KB total, so each draw is wrapped in a
+// firstPage()/nextPage() loop instead: the scene below is re-issued once per
+// page and only the 128-byte page buffer lives in RAM.
+//
+// Two consequences of page mode, both relied on here:
+//   * never call clearBuffer()/sendBuffer() — they are full-buffer only;
+//   * setDrawColor(0) only erases pixels drawn EARLIER IN THE SAME PAGE, so
+//     the shapes must be issued in the order below (background first).
 // ---------------------------------------------------------------------------
 
 // ==========================================
@@ -203,73 +211,72 @@ void startHorn(uint16_t ms) {
 void drawEye(U8G2 &display, int mode, int pupilOffset,
              bool blink) {
 
-  display.clearBuffer();
+  display.firstPage();
+  do {
 
-  // Blink animation
-  if (blink) {
-    display.drawRBox(17, 29, 94, 7, 3);
-    display.drawRBox(27, 37, 74, 3, 1);
-    display.sendBuffer();
-    return;
-  }
+    // Blink animation
+    if (blink) {
+      display.drawRBox(17, 29, 94, 7, 3);
+      display.drawRBox(27, 37, 74, 3, 1);
+    }
 
-  // Happy eye
-  if (mode == 0) {
-    display.drawRBox(13, 17, 102, 38, 16);
-    display.setDrawColor(0);
-    display.drawBox(13, 17, 102, 19);
-    display.setDrawColor(1);
-    display.drawRBox(28, 30, 72, 20, 9);
-    display.setDrawColor(0);
-    display.drawDisc(64 + pupilOffset, 39, 10);
-    display.setDrawColor(1);
-  }
+    // Happy eye
+    else if (mode == 0) {
+      display.drawRBox(13, 17, 102, 38, 16);
+      display.setDrawColor(0);
+      display.drawBox(13, 17, 102, 19);
+      display.setDrawColor(1);
+      display.drawRBox(28, 30, 72, 20, 9);
+      display.setDrawColor(0);
+      display.drawDisc(64 + pupilOffset, 39, 10);
+      display.setDrawColor(1);
+    }
 
-  // Normal eye
-  else if (mode == 1) {
-    display.drawRBox(13, 8, 102, 49, 17);
-    display.setDrawColor(0);
-    display.drawDisc(64 + pupilOffset, 33, 17);
-    display.setDrawColor(1);
-    display.drawDisc(64 + pupilOffset, 33, 10);
-    display.setDrawColor(0);
-    display.drawDisc(64 + pupilOffset - 4, 28, 4);
-    display.setDrawColor(1);
-  }
+    // Normal eye
+    else if (mode == 1) {
+      display.drawRBox(13, 8, 102, 49, 17);
+      display.setDrawColor(0);
+      display.drawDisc(64 + pupilOffset, 33, 17);
+      display.setDrawColor(1);
+      display.drawDisc(64 + pupilOffset, 33, 10);
+      display.setDrawColor(0);
+      display.drawDisc(64 + pupilOffset - 4, 28, 4);
+      display.setDrawColor(1);
+    }
 
-  // Surprised eye
-  else if (mode == 2) {
-    display.drawDisc(64, 32, 27);
-    display.setDrawColor(0);
-    display.drawDisc(64 + pupilOffset, 32, 15);
-    display.setDrawColor(1);
-    display.drawDisc(64 + pupilOffset, 32, 9);
-    display.setDrawColor(0);
-    display.drawDisc(64 + pupilOffset - 4, 27, 4);
-    display.setDrawColor(1);
-  }
+    // Surprised eye
+    else if (mode == 2) {
+      display.drawDisc(64, 32, 27);
+      display.setDrawColor(0);
+      display.drawDisc(64 + pupilOffset, 32, 15);
+      display.setDrawColor(1);
+      display.drawDisc(64 + pupilOffset, 32, 9);
+      display.setDrawColor(0);
+      display.drawDisc(64 + pupilOffset - 4, 27, 4);
+      display.setDrawColor(1);
+    }
 
-  // Sleepy eye
-  else if (mode == 3) {
-    display.drawRBox(13, 17, 102, 40, 16);
-    display.setDrawColor(0);
-    display.drawBox(13, 17, 102, 22);
-    display.drawDisc(64 + pupilOffset, 40, 13);
-    display.setDrawColor(1);
-    display.drawLine(13, 38, 115, 38);
-  }
+    // Sleepy eye
+    else if (mode == 3) {
+      display.drawRBox(13, 17, 102, 40, 16);
+      display.setDrawColor(0);
+      display.drawBox(13, 17, 102, 22);
+      display.drawDisc(64 + pupilOffset, 40, 13);
+      display.setDrawColor(1);
+      display.drawLine(13, 38, 115, 38);
+    }
 
-  // Sad eye
-  else if (mode == 4) {
-    display.drawRBox(13, 17, 102, 40, 15);
-    display.setDrawColor(0);
-    display.drawDisc(64 + pupilOffset, 40, 12);
-    display.setDrawColor(1);
-    display.drawLine(13, 17, 40, 28);
-    display.drawLine(115, 17, 88, 28);
-  }
+    // Sad eye
+    else if (mode == 4) {
+      display.drawRBox(13, 17, 102, 40, 15);
+      display.setDrawColor(0);
+      display.drawDisc(64 + pupilOffset, 40, 12);
+      display.setDrawColor(1);
+      display.drawLine(13, 17, 40, 28);
+      display.drawLine(115, 17, 88, 28);
+    }
 
-  display.sendBuffer();
+  } while (display.nextPage());
 }
 
 // ==========================================
@@ -277,60 +284,61 @@ void drawEye(U8G2 &display, int mode, int pupilOffset,
 // ==========================================
 void drawMouth(int mode, int talkingFrame) {
 
-  mouth.clearBuffer();
+  mouth.firstPage();
+  do {
 
-  // HAPPY SMILE
-  if (mode == 0) {
-    mouth.drawLine(25, 27, 38, 43);
-    mouth.drawLine(38, 43, 53, 51);
-    mouth.drawLine(53, 51, 75, 51);
-    mouth.drawLine(75, 51, 90, 43);
-    mouth.drawLine(90, 43, 103, 27);
+    // HAPPY SMILE
+    if (mode == 0) {
+      mouth.drawLine(25, 27, 38, 43);
+      mouth.drawLine(38, 43, 53, 51);
+      mouth.drawLine(53, 51, 75, 51);
+      mouth.drawLine(75, 51, 90, 43);
+      mouth.drawLine(90, 43, 103, 27);
 
-    mouth.drawLine(25, 28, 103, 28);
-  }
+      mouth.drawLine(25, 28, 103, 28);
+    }
 
-  // NORMAL / NEUTRAL
-  else if (mode == 1) {
-    mouth.drawRBox(29, 29, 70, 8, 4);
-  }
+    // NORMAL / NEUTRAL
+    else if (mode == 1) {
+      mouth.drawRBox(29, 29, 70, 8, 4);
+    }
 
-  // SURPRISED / WOW
-  else if (mode == 2) {
-    mouth.drawEllipse(64, 35, 19, 25, U8G2_DRAW_ALL);
-    mouth.drawEllipse(64, 35, 10, 16, U8G2_DRAW_ALL);
-  }
+    // SURPRISED / WOW
+    else if (mode == 2) {
+      mouth.drawEllipse(64, 35, 19, 25, U8G2_DRAW_ALL);
+      mouth.drawEllipse(64, 35, 10, 16, U8G2_DRAW_ALL);
+    }
 
-  // SLEEPY
-  else if (mode == 3) {
-    mouth.drawRBox(43, 34, 42, 5, 2);
-  }
+    // SLEEPY
+    else if (mode == 3) {
+      mouth.drawRBox(43, 34, 42, 5, 2);
+    }
 
-  // SAD
-  else if (mode == 4) {
-    mouth.drawLine(29, 47, 45, 36);
-    mouth.drawLine(45, 36, 64, 31);
-    mouth.drawLine(64, 31, 83, 36);
-    mouth.drawLine(83, 36, 99, 47);
-  }
+    // SAD
+    else if (mode == 4) {
+      mouth.drawLine(29, 47, 45, 36);
+      mouth.drawLine(45, 36, 64, 31);
+      mouth.drawLine(64, 31, 83, 36);
+      mouth.drawLine(83, 36, 99, 47);
+    }
 
-  // Talking animation for happy expression
-  if (mode == 0 && talkingFrame == 1) {
-    mouth.drawRBox(39, 31, 50, 24, 9);
-    mouth.setDrawColor(0);
-    mouth.drawRBox(47, 34, 34, 13, 4);
-    mouth.setDrawColor(1);
-  }
+    // Talking animation for happy expression
+    if (mode == 0 && talkingFrame == 1) {
+      mouth.drawRBox(39, 31, 50, 24, 9);
+      mouth.setDrawColor(0);
+      mouth.drawRBox(47, 34, 34, 13, 4);
+      mouth.setDrawColor(1);
+    }
 
-  // Talking animation for neutral expression
-  if (mode == 1 && talkingFrame == 1) {
-    mouth.drawRBox(35, 27, 58, 22, 8);
-    mouth.setDrawColor(0);
-    mouth.drawRBox(43, 32, 42, 10, 4);
-    mouth.setDrawColor(1);
-  }
+    // Talking animation for neutral expression
+    if (mode == 1 && talkingFrame == 1) {
+      mouth.drawRBox(35, 27, 58, 22, 8);
+      mouth.setDrawColor(0);
+      mouth.drawRBox(43, 32, 42, 10, 4);
+      mouth.setDrawColor(1);
+    }
 
-  mouth.sendBuffer();
+  } while (mouth.nextPage());
 }
 
 // ==========================================
