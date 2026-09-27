@@ -29,9 +29,10 @@ WIFI_WAIT_S = 120          # max seconds to wait for a default route
 PORT_RETRY_S = 10          # seconds between serial-port attempts
 STEP_SECONDS = float(os.getenv("CS_DEMO_STEP", "4"))
 GREETING = os.getenv("CS_BOOT_GREETING", "Good morning Mohini maam")
-VOICE = os.getenv("CS_TTS_VOICE", "en+f3")
-PITCH = os.getenv("CS_TTS_PITCH", "70")
-RATE = os.getenv("CS_TTS_RATE", "150")
+VOICE = os.getenv("CS_TTS_VOICE", "en-us+f3")
+PITCH = os.getenv("CS_TTS_PITCH", "65")
+RATE = os.getenv("CS_TTS_RATE", "135")
+AMPLITUDE = os.getenv("CS_TTS_AMPLITUDE", "150")
 SEQUENCE = ["FORWARD", "LEFT", "RIGHT", "BACKWARD"]
 
 log = lambda m: print(f"[demo] {m}", flush=True)
@@ -85,7 +86,8 @@ def speak(text: str) -> None:
     for engine in engines:
         try:
             r = subprocess.run(
-                [engine, "-v", VOICE, "-p", PITCH, "-s", RATE, "-w", wav, text],
+                [engine, "-v", VOICE, "-p", PITCH, "-s", RATE, "-a", AMPLITUDE,
+                 "-w", wav, text],
                 capture_output=True, timeout=30,
             )
         except Exception as exc:

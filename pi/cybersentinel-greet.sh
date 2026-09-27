@@ -16,9 +16,10 @@ ENV_FILE="/opt/cybersentinel/gateway.env"
 
 TEXT="${CS_BOOT_GREETING:-Good morning Mohini maam}"
 DELAY="${CS_BOOT_GREET_DELAY:-8}"
-VOICE="${CS_TTS_VOICE:-en+f3}"
-PITCH="${CS_TTS_PITCH:-70}"
-RATE="${CS_TTS_RATE:-150}"
+VOICE="${CS_TTS_VOICE:-en-us+f3}"
+PITCH="${CS_TTS_PITCH:-65}"
+RATE="${CS_TTS_RATE:-135}"
+AMPLITUDE="${CS_TTS_AMPLITUDE:-150}"
 
 # HDMI/headphone audio routing and ALSA need a moment after boot.
 sleep "$DELAY"
@@ -39,4 +40,4 @@ if ! "$ENGINE" -v "$VOICE" -q ok >/dev/null 2>&1; then
 fi
 
 echo "[greet] saying: $TEXT"
-exec "$ENGINE" -v "$VOICE" -p "$PITCH" -s "$RATE" "$TEXT" >/dev/null 2>&1
+exec "$ENGINE" -v "$VOICE" -p "$PITCH" -s "$RATE" -a "$AMPLITUDE" "$TEXT" >/dev/null 2>&1
