@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -72,6 +72,11 @@ export const SettingsScreen = () => {
   const showRfidWait = useAdmin((s) => s.showRfidWait);
 
   const [hostDraft, setHostDraft] = useState(connection.host);
+  // Persisted settings rehydrate from AsyncStorage asynchronously, so this
+  // screen can mount before the saved host is known. Without following the store
+  // the field keeps showing the built-in default and "Save & Reconnect" writes
+  // that stale value straight back over a discovered address.
+  const hostEdited = useRef(false);
   const [pushStatus, setPushStatus] = useState('');
   const [keyDraft, setKeyDraft] = useState('');
   const [keyStatus, setKeyStatus] = useState('');
@@ -85,6 +90,10 @@ export const SettingsScreen = () => {
   useEffect(() => {
     void getTypesafeKey().then((k) => setKeyStatus(k ? 'Key configured' : 'No key set'));
   }, []);
+
+  useEffect(() => {
+    if (!hostEdited.current) setHostDraft(connection.host);
+  }, [connection.host]);
 
   const saveKey = async () => {
     await setTypesafeKey(keyDraft);
@@ -225,7 +234,10 @@ export const SettingsScreen = () => {
             <Text style={[typography.body, { color: c.text }]}>Pi IP Address</Text>
             <TextInput
               value={hostDraft}
-              onChangeText={setHostDraft}
+              onChangeText={(t) => {
+                hostEdited.current = true;
+                setHostDraft(t);
+              }}
               autoCapitalize="none"
               autoCorrect={false}
               keyboardType="numbers-and-punctuation"

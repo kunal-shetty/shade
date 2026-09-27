@@ -101,14 +101,15 @@ export const discoverPi = async (opts: { deep?: boolean } = {}): Promise<string 
   inFlight = (async () => {
     D.set({ stage: 'searching', probing: null, message: 'Looking for the rover…', lastScanAt: Date.now() });
 
-    // Network sanity check. Only a *known* bad state aborts the search: a VPN
-    // (or a VPN on top of WiFi) reports its own type, and bailing out there is
-    // what used to leave the app stuck probing an unresolvable mDNS name.
+    // Only a definitively-offline phone aborts the search. The reported TYPE is
+    // not a trustworthy gate: a VPN reports VPN, and a lab WiFi with no internet
+    // access (plus mobile data switched on) reports CELLULAR — which is exactly
+    // the case that used to stop discovery dead with "Connect to the same WiFi
+    // as the Pi" while the phone was on that WiFi the whole time, leaving the
+    // app dialling an mDNS name Android cannot resolve.
     const state = await Network.getNetworkStateAsync().catch(() => null);
-    const T = Network.NetworkStateType;
-    const onLan = state?.isConnected !== false && state?.type !== T.NONE && state?.type !== T.CELLULAR;
-    if (!onLan) {
-      D.set({ stage: 'offline', message: 'Connect to the same WiFi as the Pi', lastScanAt: Date.now() });
+    if (state?.isConnected === false) {
+      D.set({ stage: 'offline', message: 'No network connection on the phone', lastScanAt: Date.now() });
       return null;
     }
 

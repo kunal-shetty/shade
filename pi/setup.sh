@@ -259,14 +259,39 @@ configure_mosquitto() {
 
   log "Validating the merged Mosquitto configuration"
   if ! run_mosquitto_check /etc/mosquitto/mosquitto.conf; then
-    warn "Mosquitto rejected /etc/mosquitto/mosquitto.conf (exit ${LAST_MOSQ_CODE}, output above)."
-    warn "Every file in /etc/mosquitto/conf.d/ is merged into that config, and a stale"
-    warn "one from an earlier attempt can redeclare the same listeners. Check both:"
-    ss -ltnp 2>/dev/null | grep -E ':(1883|9001)[[:space:]]' >&2 || warn "  (nothing listening on 1883/9001)"
-    ls -l /etc/mosquitto/conf.d/ >&2 || true
-    warn "Remove any file there you did not expect, then re-run:"
-    warn "  sudo rm /etc/mosquitto/conf.d/<stale>.conf && sudo bash pi/setup.sh"
-    return 1
+    # conf.d is merged wholesale, so a leftover file from an earlier attempt (this
+    # repo used to write cyber.conf) can redeclare listener 9001 and invalidate
+    # the whole config - the broker then never starts and the phone loses live
+    # telemetry. Repair it here instead of making the user go hunting: move the
+    # foreign files aside, validate again, and put them back if that was not it.
+    local backup=/etc/mosquitto/conf.d.disabled moved=() file
+    warn "Mosquitto rejected the merged config (exit ${LAST_MOSQ_CODE}, output above)."
+    install -d "${backup}" 2>/dev/null || true
+    for file in /etc/mosquitto/conf.d/*.conf; do
+      [[ -e "${file}" ]] || continue
+      [[ "${file}" == "${target}" ]] && continue
+      if mv "${file}" "${backup}/" 2>/dev/null; then
+        moved+=("$(basename "${file}")")
+        warn "  moved aside: $(basename "${file}")"
+      fi
+    done
+
+    if [[ "${#moved[@]}" -gt 0 ]] && run_mosquitto_check /etc/mosquitto/mosquitto.conf; then
+      log "${moved[*]} redeclared our listeners — ${target} works on its own now."
+      log "  Backed up in ${backup}/; remove when you are sure: sudo rm -rf ${backup}"
+    else
+      # Put them back: they were not the cause, so do not quietly change a
+      # config the user may have added on purpose.
+      for file in "${moved[@]:-}"; do
+        [[ -n "${file}" ]] && mv "${backup}/${file}" /etc/mosquitto/conf.d/ 2>/dev/null || true
+      done
+      [[ "${#moved[@]}" -gt 0 ]] && warn "  put them back — they were not the cause"
+      warn "Every file in /etc/mosquitto/conf.d/ is merged into that config, and a stale"
+      warn "one from an earlier attempt can redeclare the same listeners. Check both:"
+      ss -ltnp 2>/dev/null | grep -E ':(1883|9001)[[:space:]]' >&2 || warn "  (nothing listening on 1883/9001)"
+      ls -l /etc/mosquitto/conf.d/ >&2 || true
+      return 1
+    fi
   fi
 
   systemctl enable mosquitto >/dev/null 2>&1 || true

@@ -47,16 +47,20 @@ export const useSettings = create<SettingsState>()(
   persist(
     (set) => ({
       connection: {
-        host: 'cybersentinel.local',
+        // The IP, not the mDNS name: Android's resolver does not do mDNS, so an
+        // app pointed at cybersentinel.local dies with java.net.UnknownHostException
+        // before a single packet leaves the phone. Auto-discovery below corrects
+        // this if the lease ever changes.
+        host: '192.168.0.115',
         wsPort: 8765,
         mqttPort: 9001,
         apiPort: 8000,
-      streamPort: 8080,
-      autoReconnect: true,
-      demoMode: false,
-      autoDiscover: true,
-      hostname: 'cybersentinel.local',
-    },
+        streamPort: 8080,
+        autoReconnect: true,
+        demoMode: false,
+        autoDiscover: true,
+        hostname: 'cybersentinel.local',
+      },
       prefs: {
         pushEnabled: true,
         notificationThreshold: 'high',
