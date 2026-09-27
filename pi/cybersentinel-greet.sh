@@ -21,7 +21,7 @@ VOICE="${CS_TTS_VOICE:-en-us+f3}"
 PITCH="${CS_TTS_PITCH:-65}"
 RATE="${CS_TTS_RATE:-135}"
 AMPLITUDE="${CS_TTS_AMPLITUDE:-150}"
-AUDIO_DEVICE="${CS_AUDIO_DEVICE:-}"
+AUDIO_DEVICE="${CS_AUDIO_DEVICE:-plughw:2,0}"   # 3.5mm jack (card 2) — confirmed audible
 
 # HDMI/headphone audio routing and ALSA need a moment after boot.
 sleep "$DELAY"

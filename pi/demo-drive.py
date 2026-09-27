@@ -32,7 +32,7 @@ VOICE = os.getenv("CS_TTS_VOICE", "en-us+f3")
 PITCH = os.getenv("CS_TTS_PITCH", "65")
 RATE = os.getenv("CS_TTS_RATE", "135")
 AMPLITUDE = os.getenv("CS_TTS_AMPLITUDE", "150")
-AUDIO_DEVICE = os.getenv("CS_AUDIO_DEVICE", "")   # e.g. plughw:1,0
+AUDIO_DEVICE = os.getenv("CS_AUDIO_DEVICE", "plughw:2,0")   # 3.5mm jack (card 2) — confirmed audible on this Pi
 SEQUENCE = ["FORWARD", "LEFT", "RIGHT", "BACKWARD"]
 
 log = lambda m: print(f"[demo] {time.strftime('%H:%M:%S')} {m}", flush=True)
