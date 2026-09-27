@@ -5,13 +5,13 @@ import Svg, { Circle, Line } from 'react-native-svg';
 import { Ionicons } from '@expo/vector-icons';
 import { palette, spacing, typography, useTheme } from '../theme/theme';
 import { useLiveData } from '../store/rover';
-import { useIsAdmin, useAdmin } from '../store/settings';
+import { useIsAdmin, useAdmin, useSettings } from '../store/settings';
 import { AdminLock } from '../components/AdminLock';
 import { JoystickPad } from '../components/JoystickPad';
 import { ArcGauge } from '../components/Gauges';
 import { Card, PrimaryButton, SectionHeader } from '../components/ui';
 import { VoiceControl } from '../components/VoiceControl';
-import { createJoystickSender, sendRoverCommand } from '../services/roverLink';
+import { createJoystickSender, onRoverAck, sendRoverCommand } from '../services/roverLink';
 
 const SpeedSlider = ({ value, onChange, disabled }: { value: number; onChange: (v: number) => void; disabled: boolean }) => {
   const c = useTheme();
@@ -92,7 +92,22 @@ export const ControlScreen = () => {
 
   const [speedLimit, setSpeedLimit] = useState(60);
   const [patrolActive, setPatrolActive] = useState(false);
+  const [linkError, setLinkError] = useState<string | null>(null);
+  const host = useSettings((s) => s.connection.host);
   const sender = useRef(createJoystickSender()).current;
+
+  // Driving a rover whose socket is down used to look identical to driving one
+  // that is fine: the packet vanished and the screen said nothing. Both the
+  // dropped command and the gateway's own refusals ("serial link is down") are
+  // worth a line of red text, because they point at completely different fixes.
+  useEffect(
+    () =>
+      onRoverAck((ack) => {
+        if (ack.type === 'error') setLinkError(String(ack.message ?? 'command rejected by the gateway'));
+        else if (ack.type === 'ack') setLinkError(null);
+      }),
+    [],
+  );
 
   useEffect(() => {
     sendRoverCommand({ cmd: 'SET_SPEED', value: speedLimit });
@@ -123,12 +138,28 @@ export const ControlScreen = () => {
           </View>
         </View>
 
+        {!connected || linkError ? (
+          <View style={[styles.linkWarn, { backgroundColor: `${palette.threatCritical}14`, borderColor: `${palette.threatCritical}55` }]}>
+            <Ionicons name="alert-circle" size={13} color={palette.threatCritical} />
+            <Text style={[typography.caption, { color: palette.threatCritical, flex: 1, fontWeight: '700' }]}>
+              {linkError ??
+                `No control link to ${host} — MOVE packets are being dropped. Set the Pi's IP address in Settings → Connection.`}
+            </Text>
+          </View>
+        ) : null}
+
         {/* Joystick */}
         <AdminLock onRequestUnlock={() => showRfidModal(true)} lockedHint="Scan RFID at rover to unlock driving">
           <View style={[styles.joyCard, { backgroundColor: c.card, borderColor: c.border }]}>
             <JoystickPad
               disabled={false}
-              onMove={(angle, speed) => sender.move(angle, speed, speedLimit)}
+              onMove={(angle, speed) => {
+                if (!connected) {
+                  setLinkError(`No control link to ${host} — nothing sent`);
+                  return;
+                }
+                sender.move(angle, speed, speedLimit);
+              }}
               onStop={() => sender.stop()}
             />
             <Text style={[typography.caption, { color: c.textMuted, marginTop: spacing.md, textAlign: 'center' }]}>
@@ -203,6 +234,7 @@ const styles = StyleSheet.create({
   container: { padding: spacing.lg, gap: spacing.lg, paddingBottom: 48 },
   headerRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
   linkChip: { flexDirection: 'row', alignItems: 'center', gap: 5, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 999 },
+  linkWarn: { flexDirection: 'row', alignItems: 'center', gap: 7, borderWidth: 1, borderRadius: 12, paddingHorizontal: spacing.md, paddingVertical: 10 },
   joyCard: { borderWidth: 1, borderRadius: 18, padding: spacing.xl, alignItems: 'center' },
   sliderRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   sliderLabel: { flexDirection: 'row', alignItems: 'center' },

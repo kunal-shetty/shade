@@ -40,14 +40,20 @@ export const probeHost = async (host: string, port: number, timeoutMs = PROBE_TI
   }
 };
 
-const scanSubnet = async (ownIp: string, port: number, onProbe?: (host: string) => void): Promise<string | null> => {
-  const parts = ownIp.split('.');
-  if (parts.length !== 4) return null;
-  const base = parts.slice(0, 3).join('.');
+/** `192.168.0.115` -> `192.168.0`; anything that is not a plain IPv4 -> null. */
+const subnetOf = (ip: string | null | undefined): string | null => {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec((ip ?? '').trim());
+  if (!m) return null;
+  const octets = [m[1], m[2], m[3]];
+  if (octets.some((o) => Number(o) > 255)) return null;
+  return octets.join('.');
+};
+
+const scanSubnet = async (base: string, port: number, onProbe?: (host: string) => void, skip?: string): Promise<string | null> => {
   const hosts: string[] = [];
   for (let i = 1; i <= 254; i += 1) {
     const host = `${base}.${i}`;
-    if (host !== ownIp) hosts.push(host);
+    if (host !== skip) hosts.push(host);
   }
 
   let cursor = 0;
@@ -95,14 +101,12 @@ export const discoverPi = async (opts: { deep?: boolean } = {}): Promise<string 
   inFlight = (async () => {
     D.set({ stage: 'searching', probing: null, message: 'Looking for the rover…', lastScanAt: Date.now() });
 
-    // Network sanity check — both devices must share a WiFi/Ethernet network.
+    // Network sanity check. Only a *known* bad state aborts the search: a VPN
+    // (or a VPN on top of WiFi) reports its own type, and bailing out there is
+    // what used to leave the app stuck probing an unresolvable mDNS name.
     const state = await Network.getNetworkStateAsync().catch(() => null);
-    const onLan =
-      state?.isConnected !== false &&
-      (state?.type === Network.NetworkStateType.WIFI ||
-        state?.type === Network.NetworkStateType.ETHERNET ||
-        state?.type === Network.NetworkStateType.UNKNOWN ||
-        state?.type === undefined);
+    const T = Network.NetworkStateType;
+    const onLan = state?.isConnected !== false && state?.type !== T.NONE && state?.type !== T.CELLULAR;
     if (!onLan) {
       D.set({ stage: 'offline', message: 'Connect to the same WiFi as the Pi', lastScanAt: Date.now() });
       return null;
@@ -128,16 +132,18 @@ export const discoverPi = async (opts: { deep?: boolean } = {}): Promise<string 
     // Fall back to scanning the local subnet, unless the caller only wants a
     // quick check (e.g. a periodic light retry).
     if (opts.deep) {
-      let ownIp = '0.0.0.0';
+      let ownIp = '';
       try {
         ownIp = await Network.getIpAddressAsync();
       } catch {
-        ownIp = '0.0.0.0';
+        ownIp = '';
       }
-      const ipOk = /^\d{1,3}(\.\d{1,3}){3}$/.test(ownIp) && ownIp !== '0.0.0.0';
-      if (ipOk) {
-        D.set({ message: `Scanning ${ownIp.split('.').slice(0, 3).join('.')}.0/24…` });
-        const found = await scanSubnet(ownIp, connection.apiPort, (host) => D.set({ probing: host }));
+      // A VPN hands back its own address, which sits on no LAN the rover is on,
+      // so the address the Pi was last reached at is just as good a lead.
+      const subnets = dedupe([subnetOf(ownIp), subnetOf(connection.host), subnetOf(connection.hostname)]);
+      for (const subnet of subnets) {
+        D.set({ message: `Scanning ${subnet}.0/24…` });
+        const found = await scanSubnet(subnet, connection.apiPort, (host) => D.set({ probing: host }), ownIp);
         if (found) {
           lastGoodHost = found;
           if (found !== connection.host) setConnection({ host: found });

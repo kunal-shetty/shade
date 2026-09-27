@@ -9,6 +9,7 @@ import { Card } from '../components/ui';
 import { disconnectMqtt, connectMqtt } from '../services/mqtt';
 import { connectRoverLink, disconnectRoverLink } from '../services/roverLink';
 import { discoverPi } from '../services/discovery';
+import { DEFAULT_SPEAKER_TEST_TEXT, stopSpeakerTest, testPiSpeaker } from '../services/speakerTest';
 import { getTypesafeKey, setTypesafeKey } from '../services/secrets';
 import { registerPushToken, requestNotificationPermission } from '../services/notifications';
 
@@ -75,6 +76,10 @@ export const SettingsScreen = () => {
   const [keyDraft, setKeyDraft] = useState('');
   const [keyStatus, setKeyStatus] = useState('');
   const [discoveryBusy, setDiscoveryBusy] = useState(false);
+  const [speakerDraft, setSpeakerDraft] = useState('');
+  const [speakerBusy, setSpeakerBusy] = useState(false);
+  const [speakerStatus, setSpeakerStatus] = useState('');
+  const [speakerOk, setSpeakerOk] = useState<boolean | null>(null);
   const discovery = useDiscovery();
 
   useEffect(() => {
@@ -111,6 +116,23 @@ export const SettingsScreen = () => {
     disconnectRoverLink();
     connectMqtt();
     connectRoverLink();
+  };
+
+  // Plays a line on the Pi's speaker and reports which path carried it, so a
+  // silent rover can be told apart from "Queued on the Pi over the control socket".
+  const runSpeakerTest = async () => {
+    if (speakerBusy) return;
+    setSpeakerBusy(true);
+    setSpeakerOk(null);
+    setSpeakerStatus('Sending to the Pi…');
+    try {
+      const result = await testPiSpeaker(speakerDraft);
+      setSpeakerOk(result.ok);
+      const via = result.path === 'ws' ? 'control socket' : result.path === 'rest' ? 'REST' : 'phone speaker';
+      setSpeakerStatus(`${result.detail} Heard over the ${via}: “${result.speaking}”`);
+    } finally {
+      setSpeakerBusy(false);
+    }
   };
 
   const handleAdminLogin = () => {
@@ -322,6 +344,56 @@ export const SettingsScreen = () => {
               onChange={(v) => setPrefs({ voiceLanguage: v })}
             />
           </Row>
+        </Card>
+
+        {/* Speaker test */}
+        <Card>
+          <View style={styles.cardTitleRow}>
+            <Ionicons name="volume-high" size={14} color={c.primary} />
+            <Text style={[typography.caption, { color: c.textMuted, marginLeft: 6, letterSpacing: 0.8 }]}>SPEAKER TEST</Text>
+          </View>
+          <Text style={[typography.caption, { color: c.textMuted }]}>
+            Sends a line to the Pi's speaker over the same path voice replies use, then reports the TTS engine that
+            spoke it. Silence with a green result means the Pi has no engine installed.
+          </Text>
+          <TextInput
+            value={speakerDraft}
+            onChangeText={setSpeakerDraft}
+            placeholder={DEFAULT_SPEAKER_TEST_TEXT}
+            placeholderTextColor={c.textMuted}
+            multiline
+            style={[styles.input, { borderColor: c.border, color: c.text, backgroundColor: c.surface, textAlign: 'left', width: '100%' }]}
+          />
+          <View
+            style={[styles.wideBtn, { backgroundColor: speakerBusy ? c.border : palette.accent }]}
+            onTouchEnd={() => {
+              if (!speakerBusy) void runSpeakerTest();
+            }}
+            accessibilityRole="button"
+            accessibilityLabel="Test the Pi speaker"
+          >
+            <Ionicons name="volume-high" size={15} color="white" />
+            <Text style={styles.wideBtnText}>{speakerBusy ? ' Sending…' : ' Test Pi Speaker'}</Text>
+          </View>
+          <View
+            style={[styles.wideBtn, { backgroundColor: c.surface, borderWidth: 1, borderColor: c.border }]}
+            onTouchEnd={stopSpeakerTest}
+            accessibilityRole="button"
+            accessibilityLabel="Stop speaking"
+          >
+            <Ionicons name="stop-circle" size={15} color={c.text} />
+            <Text style={[styles.wideBtnText, { color: c.text }]}> Stop Speaking</Text>
+          </View>
+          {speakerStatus ? (
+            <View style={styles.discoveryStatus}>
+              <Ionicons
+                name={speakerOk == null ? 'ellipsis-horizontal' : speakerOk ? 'checkmark-circle' : 'alert-circle'}
+                size={14}
+                color={speakerOk == null ? c.textMuted : speakerOk ? palette.threatLow : palette.threatCritical}
+              />
+              <Text style={[typography.caption, { color: c.textMuted, flex: 1 }]}>{speakerStatus}</Text>
+            </View>
+          ) : null}
         </Card>
 
         {/* Notifications */}

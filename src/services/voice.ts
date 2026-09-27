@@ -53,7 +53,7 @@ const pick = (options: readonly string[]): string =>
  * The phone's fallback voice. Slightly raised pitch for a friendlier, chirpier
  * delivery — the Pi's voice is tuned separately (CS_TTS_VOICE / CS_TTS_PITCH).
  */
-const PHONE_VOICE = { pitch: 1.18, rate: 1.04 } as const;
+export const PHONE_VOICE = { pitch: 1.18, rate: 1.04 } as const;
 
 export const VOICE_ACTIONS: ActionDef[] = [
   {

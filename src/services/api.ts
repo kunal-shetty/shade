@@ -101,6 +101,13 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(on == null ? {} : { on }),
     }),
+  speak: (text: string) =>
+    request<{ ok: boolean; speaking: string; source: string }>('/speak', {
+      method: 'POST',
+      body: JSON.stringify({ text }),
+    }),
+  voiceStatus: () =>
+    request<{ tts_engine: string; tts_voice: string; tts_pitch: number }>('/voice/status'),
   cameraStatus: () =>
     request<{
       online: boolean;
