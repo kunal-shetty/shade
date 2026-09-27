@@ -16,7 +16,14 @@
           }
         }
       ],
-      "expo-font"
+      "expo-font",
+      [
+        "expo-speech-recognition",
+        {
+          "microphonePermission": "Allow CyberSentinel to listen for rover voice commands.",
+          "speechRecognitionPermission": "Allow CyberSentinel to transcribe your voice commands."
+        }
+      ]
     ],
     "ios": {
       "supportsTablet": true,
