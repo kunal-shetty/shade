@@ -1,5 +1,6 @@
 import { useLiveData } from '../store/rover';
-import { useSettings } from '../store/settings';
+import { isIpv4, useSettings } from '../store/settings';
+import { discoverPi } from './discovery';
 import type { RoverCommand } from '../types';
 
 let ws: WebSocket | null = null;
@@ -7,6 +8,35 @@ let manualStop = false;
 let backoffMs = 500;
 let pingTimer: ReturnType<typeof setInterval> | null = null;
 let pendingPing: number | null = null;
+let healTimer: ReturnType<typeof setTimeout> | null = null;
+let healRunning = false;
+let healBackoffMs = 1500;
+
+/**
+ * Last-resort repair for a host the phone cannot dial (e.g. a saved
+ * `cybersentinel.local`): sweep the WiFi for the gateway and reconnect to
+ * whatever answers. Without this a stale mDNS name leaves the rover dead to
+ * the app while everything on the Pi is healthy.
+ */
+const scheduleHostHeal = (immediate = false) => {
+  const { autoDiscover, demoMode } = useSettings.getState().connection;
+  if (demoMode || !autoDiscover || manualStop) return;
+  if (healTimer || healRunning) return;
+  const delayMs = immediate ? 0 : healBackoffMs;
+  // A full subnet sweep is not free, so space the attempts out when the Pi is
+  // genuinely absent (wrong WiFi) instead of re-scanning on every timeout.
+  healBackoffMs = Math.min(healBackoffMs * 2, 30_000);
+  healTimer = setTimeout(async () => {
+    healTimer = null;
+    if (manualStop || ws !== null) return;
+    healRunning = true;
+    const found = await discoverPi({ deep: true }).catch(() => null);
+    healRunning = false;
+    if (!found || manualStop) return;
+    // discovery wrote the new host into settings when it differed
+    connectRoverLink();
+  }, delayMs);
+};
 
 const listeners = new Set<(ack: Record<string, unknown>) => void>();
 
@@ -53,6 +83,10 @@ export const connectRoverLink = () => {
     return;
   }
 
+  // Something a DNS-free phone can actually resolve is the only thing worth
+  // dialling; otherwise hunt for the Pi straight away.
+  if (!isIpv4(host)) scheduleHostHeal(true);
+
   const url = `ws://${host}:${wsPort}`;
   let socket: WebSocket;
   try {
@@ -65,6 +99,7 @@ export const connectRoverLink = () => {
 
   socket.onopen = () => {
     backoffMs = 500;
+    healBackoffMs = 1500;
     useLiveData.getState().setWsState('connected');
     startPing();
   };
@@ -105,6 +140,9 @@ export const connectRoverLink = () => {
     ws = null;
     stopPing();
     useLiveData.getState().setWsState('reconnecting');
+    // A refused/unresolvable address is not fixed by retrying the same host,
+    // so look the Pi up again alongside the normal backoff.
+    scheduleHostHeal();
     if (useSettings.getState().connection.autoReconnect) scheduleReconnect();
   };
 };

@@ -3,7 +3,7 @@ import { ScrollView, StyleSheet, Switch, Text, TextInput, View } from 'react-nat
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { palette, spacing, typography, useTheme } from '../theme/theme';
-import { useAdmin, useSettings } from '../store/settings';
+import { DEFAULT_HOST, isIpv4, sanitizeHost, useAdmin, useSettings } from '../store/settings';
 import { useDiscovery } from '../store/discovery';
 import { Card } from '../components/ui';
 import { disconnectMqtt, connectMqtt } from '../services/mqtt';
@@ -120,7 +120,12 @@ export const SettingsScreen = () => {
 
   // reconnect services when Save is pressed
   const applyAndReconnect = () => {
-    setConnection({ host: hostDraft.trim() || connection.hostname || 'cybersentinel.local' });
+    // Never fall back to the mDNS name: Android cannot resolve it, so an empty
+    // field used to save `cybersentinel.local` and kill every link silently.
+    const host = sanitizeHost(hostDraft);
+    hostEdited.current = false;
+    setHostDraft(host);
+    setConnection({ host });
     disconnectMqtt();
     disconnectRoverLink();
     connectMqtt();
@@ -244,6 +249,15 @@ export const SettingsScreen = () => {
               style={[styles.input, { borderColor: c.border, color: c.text, backgroundColor: c.surface, flex: 1 }]}
             />
           </View>
+          {hostDraft.trim() && !isIpv4(hostDraft) ? (
+            <View style={styles.discoveryStatus}>
+              <Ionicons name="alert-circle" size={14} color={palette.threatMedium} />
+              <Text style={[typography.caption, { color: palette.threatMedium, flex: 1 }]}>
+                Android cannot resolve “{hostDraft.trim()}” — it only understands mDNS on a computer. Use the Pi's IP
+                (e.g. {DEFAULT_HOST}), or tap Find Pi on this WiFi.
+              </Text>
+            </View>
+          ) : null}
           <View style={styles.discoveryStatus}>
             <Ionicons
               name={
