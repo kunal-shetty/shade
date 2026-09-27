@@ -84,12 +84,36 @@ def open_serial():
 
 
 def speak(text: str) -> None:
-    """Text-to-speech on the Pi speaker: espeak-ng renders a WAV, then every
-    player/device is tried until one is audible. No audio file is shipped —
-    the voice is synthesized from the text every time."""
+    """Say `text` on the Pi speaker.
+
+    The WORKING command (tested by the user on this Pi, audible on the USB
+    speaker) is hardcoded first — plain, direct audio output, no WAV detour:
+
+        espeak-ng -v en-us+f3 -s 135 -p 65 -a 150 "Good morning Mohini ma'am"
+
+    Only if that exact invocation fails do we fall back to the WAV + player
+    walk (paplay/ffplay/aplay/plughw) for resilience across audio stacks.
+    """
+    # --- 1. the hardcoded, known-good direct invocation -------------------
+    log("saying (direct espeak): " + text)
+    try:
+        r = subprocess.run(
+            ["espeak-ng", "-v", "en-us+f3", "-s", "135", "-p", "65",
+             "-a", "150", text],
+            capture_output=True, timeout=30,
+        )
+        if r.returncode == 0:
+            return
+        log("direct espeak-ng failed: "
+            + r.stderr.decode(errors='replace').strip()[:150])
+    except FileNotFoundError:
+        log("espeak-ng not found")
+    except Exception as exc:
+        log(f"direct espeak-ng blew up: {exc}")
+
+    # --- 2. fallback: render a WAV, then walk every player/device ---------
     wav = "/tmp/cs_greet.wav"
-    engines = [e for e in ("espeak-ng", "espeak")
-               if shutil.which(e)]
+    engines = [e for e in ("espeak-ng", "espeak") if shutil.which(e)]
     if not engines:
         log("no TTS engine installed — greeting skipped")
         return

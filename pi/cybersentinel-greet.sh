@@ -41,11 +41,19 @@ if ! "$ENGINE" -v "$VOICE" -q ok >/dev/null 2>&1; then
   [ "$VOICE" = "en" ] || VOICE="en"
 fi
 
-# Render the voice to a temp WAV (no audio file is shipped — this is synthesized
-# from text every time), then try players until the speaker is audible. Plain
-# espeak output dies silently under sudo / before PipeWire, so the players do
-# the real work: session first (paplay/ffplay), then raw ALSA devices.
-echo "[greet] saying: $TEXT"
+# 1. THE HARDCODED COMMAND — tested audible on this Pi's USB speaker:
+#      espeak-ng -v en-us+f3 -s 135 -p 65 -a 150 "Good morning Mohini ma'am"
+#    Try it verbatim (with the configured text) before anything fancy.
+echo "[greet] saying (direct espeak): $TEXT"
+if espeak-ng -v en-us+f3 -s 135 -p 65 -a 150 "$TEXT" >/dev/null 2>&1; then
+  exit 0
+fi
+
+# 2. Fallback: render to a temp WAV (synthesized from text, nothing shipped),
+#    then try players until the speaker is audible: session players first
+#    (paplay/ffplay), then raw ALSA devices that work under sudo / before
+#    PipeWire is up.
+echo "[greet] direct path failed — trying the player walk"
 WAV="/tmp/cs_greet.wav"
 "$ENGINE" -v "$VOICE" -p "$PITCH" -s "$RATE" -a "$AMPLITUDE" -w "$WAV" "$TEXT" >/dev/null 2>&1 \
   || { echo "[greet] render failed"; exit 0; }
