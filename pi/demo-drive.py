@@ -83,17 +83,62 @@ def open_serial():
             time.sleep(PORT_RETRY_S)
 
 
+def render_wav(text: str, wav: str) -> bool:
+    """Synthesize `text` to a WAV with the hardcoded espeak-ng flags."""
+    try:
+        r = subprocess.run(
+            ["espeak-ng", "-v", "en-us+f3", "-s", "135", "-p", "65",
+             "-a", "150", "-w", wav, text],
+            capture_output=True, timeout=30,
+        )
+    except FileNotFoundError:
+        log("espeak-ng not found")
+        return False
+    except Exception as exc:
+        log(f"espeak-ng render blew up: {exc}")
+        return False
+    if r.returncode == 0 and os.path.isfile(wav) and os.path.getsize(wav) > 1000:
+        return True
+    log("espeak-ng render failed: " + r.stderr.decode(errors='replace').strip()[:150])
+    return False
+
+
+def play(argv) -> bool:
+    """Run one player command; True only on a clean exit."""
+    if shutil.which(argv[0]) is None:
+        return False
+    log("playing via " + " ".join(argv[:4]))
+    try:
+        r = subprocess.run(argv, capture_output=True, timeout=30)
+    except Exception as exc:
+        log(f"{argv[0]} blew up: {exc}")
+        return False
+    if r.returncode == 0:
+        return True
+    err = r.stderr.decode(errors="replace").strip().splitlines()
+    log(f"{argv[0]} silent ({err[-1][:120] if err else 'exit ' + str(r.returncode)})")
+    return False
+
+
 def speak(text: str) -> None:
     """Say `text` on the Pi speaker.
 
-    The WORKING command (tested by the user on this Pi, audible on the USB
-    speaker) is hardcoded first — plain, direct audio output, no WAV detour:
-
-        espeak-ng -v en-us+f3 -s 135 -p 65 -a 150 "Good morning Mohini ma'am"
-
-    Only if that exact invocation fails do we fall back to the WAV + player
-    walk (paplay/ffplay/aplay/plughw) for resilience across audio stacks.
+    ORDER MATTERS on this Pi: aplay -l shows ONLY two HDMI cards (the TV!) and
+    the 3.5mm jack — the default route lands on HDMI, which is why the greeting
+    was heard on the TV. So:
+      0. CS_AUDIO_DEVICE (gateway.env, e.g. plughw:2,0 for the jack) WINS —
+         render a WAV and play it on exactly that card.
+      1. the hardcoded direct command (goes to the system default route),
+      2. a walk over every remaining player/device as a last resort.
     """
+    wav = "/tmp/cs_greet.wav"
+
+    # --- 0. pinned device beats the (HDMI-leaning) default route ----------
+    if AUDIO_DEVICE:
+        if render_wav(text, wav) and play(["aplay", "-q", "-D", AUDIO_DEVICE, wav]):
+            return
+        log(f"pinned device {AUDIO_DEVICE} failed — falling back")
+
     # --- 1. the hardcoded, known-good direct invocation -------------------
     log("saying (direct espeak): " + text)
     try:
@@ -111,62 +156,30 @@ def speak(text: str) -> None:
     except Exception as exc:
         log(f"direct espeak-ng blew up: {exc}")
 
-    # --- 2. fallback: render a WAV, then walk every player/device ---------
-    wav = "/tmp/cs_greet.wav"
-    engines = [e for e in ("espeak-ng", "espeak") if shutil.which(e)]
-    if not engines:
-        log("no TTS engine installed — greeting skipped")
-        return
-
-    rendered = False
-    for engine in engines:
-        try:
-            r = subprocess.run(
-                [engine, "-v", VOICE, "-p", PITCH, "-s", RATE, "-a", AMPLITUDE,
-                 "-w", wav, text],
-                capture_output=True, timeout=30,
-            )
-        except Exception as exc:
-            log(f"{engine} render blew up: {exc}")
-            continue
-        if r.returncode == 0 and os.path.isfile(wav) and os.path.getsize(wav) > 1000:
-            rendered = True
-            break
-        log(f"{engine} render failed: {r.stderr.decode(errors='replace').strip()[:120]}")
-    if not rendered:
+    # --- 2. fallback: WAV + walk every player/device ----------------------
+    if not render_wav(text, wav):
         log("could not render speech — greeting skipped")
         return
 
-    # Forced device first (CS_AUDIO_DEVICE), then the session players, then
-    # raw ALSA devices that work under sudo / before PipeWire is up.
-    players = []
-    if AUDIO_DEVICE:
-        players.append(["aplay", "-q", "-D", AUDIO_DEVICE, wav])
-    players += [
+    # Walk every remaining player/device. The jack (card 2 = bcm2835
+    # Headphones) is tried BEFORE the HDMI cards so a circular-plug speaker
+    # wins over the TV.
+    for argv in (
         ["paplay", wav],
         ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", wav],
-        ["aplay", "-q", wav],
+        ["aplay", "-q", "-D", "plughw:2,0", wav],
         ["aplay", "-q", "-D", "plughw:0,0", wav],
         ["aplay", "-q", "-D", "plughw:1,0", wav],
-        ["aplay", "-q", "-D", "plughw:2,0", wav],
-    ]
-    for cmd in players:
-        if shutil.which(cmd[0]) is None:
-            continue
-        log("playing via " + " ".join(cmd[:2] + (cmd[3:4] if len(cmd) > 3 else [])))
-        try:
-            r = subprocess.run(cmd, capture_output=True, timeout=30)
-        except Exception as exc:
-            log(f"{cmd[0]} blew up: {exc}")
-            continue
-        if r.returncode == 0:
+        ["aplay", "-q", wav],
+    ):
+        if play(argv):
             return
-        err = r.stderr.decode(errors="replace").strip().splitlines()
-        log(f"{cmd[0]} silent ({err[-1][:120] if err else 'exit ' + str(r.returncode)})")
     log("no audio path worked — on the Pi run: aplay -l ; sudo raspi-config (Audio)")
 
 
 def main() -> int:
+    speak(GREETING)              # wheels are safe and parked; now talk
+
     ser = open_serial()          # the only hard dependency — motors first
 
     def stop_motors() -> None:
@@ -184,7 +197,6 @@ def main() -> int:
     signal.signal(signal.SIGTERM, on_signal)
     signal.signal(signal.SIGINT, on_signal)
 
-    speak(GREETING)              # wheels are safe and parked; now talk
 
     log(f"demo loop started: {' -> '.join(SEQUENCE)}, {STEP_SECONDS:.0f}s each, forever")
     try:
