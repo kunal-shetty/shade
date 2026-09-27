@@ -501,17 +501,11 @@ install -m 755 "${REPO_DIR}/pi/cybersentinel-greet.sh" /usr/local/bin/cybersenti
 sed "s/^User=pi$/User=${RUN_USER}/" "${REPO_DIR}/pi/cybersentinel-greet.service" \
   > /etc/systemd/system/cybersentinel-greet.service
 systemctl daemon-reload
-if [[ -f "${REPO_DIR}/pi/demo-drive.py" ]]; then
-  # The autonomous demo greets on its speaker AFTER WiFi itself, so enabling
-  # this oneshot as well would say the line twice on every boot. It stays
-  # installed for standalone use:
-  #   sudo systemctl enable --now cybersentinel-greet.service
-  log "Boot greeting will be spoken by the boot demo (greet.service left disabled)"
-else
-  systemctl enable cybersentinel-greet.service >/dev/null 2>&1 \
-    || warn "could not enable cybersentinel-greet.service"
-  systemctl restart cybersentinel-greet.service 2>/dev/null || true   # hear it once now
-fi
+# The autonomous demo (below) speaks the greeting itself, so this oneshot stays
+# DISABLED when the demo is installed — otherwise the Pi says the line twice at
+# every boot. It remains installed for standalone use:
+#   sudo systemctl enable --now cybersentinel-greet.service
+#   sudo /usr/local/bin/cybersentinel-greet.sh          # say it right now
 
 # ---------------------------------------------------------------------------
 # Autonomous boot demo — no app, no server: after boot the Pi greets on its
@@ -520,6 +514,22 @@ fi
 # serial port. Always STOPs on shutdown/reboot/timeout.
 # Tunables in gateway.env:  CS_BOOT_GREETING, CS_DEMO_STEP  (see the example).
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Autonomous boot demo — no app, no server: after boot the Pi greets on its
+# speaker, then drives the rover in a fixed loop (FORWARD -> LEFT -> RIGHT ->
+# BACKWARD, CS_DEMO_STEP seconds each) by writing straight to the Arduino's
+# serial port. Always STOPs on shutdown/reboot. Enabled = automatic at boot.
+# Tunables in gateway.env: CS_BOOT_GREETING, CS_DEMO_STEP, CS_AUDIO_DEVICE.
+#
+# The demo needs the Arduino ALONE: the gateway (and anything else) opening the
+# same /dev/ttyACM* interleaves its bytes with the demo's and the Uno receives
+# garbled half-commands — the rover freezes. So when the demo is installed the
+# gateway service is stopped and disabled by default (re-enable it if the app
+# is wanted again:
+#   sudo systemctl disable --now cybersentinel-demo.service && \
+#   sudo systemctl enable --now cybersentinel-gateway.service ).
+# ---------------------------------------------------------------------------
+DEMO_ENABLED=0
 if [[ -f "${REPO_DIR}/pi/demo-drive.py" ]]; then
   log "Installing the autonomous boot demo"
   install -m 644 "${REPO_DIR}/pi/demo-drive.py" "${INSTALL_DIR}/demo-drive.py"
@@ -528,10 +538,23 @@ if [[ -f "${REPO_DIR}/pi/demo-drive.py" ]]; then
   systemctl daemon-reload
   systemctl enable --now cybersentinel-demo.service \
     || warn "could not start cybersentinel-demo.service"
+  DEMO_ENABLED=1
+  # Keep the serial port exclusive to the demo. The gateway is NOT deleted —
+  # it is just parked; one command brings the app back.
+  systemctl disable --now cybersentinel-gateway.service >/dev/null 2>&1 \
+    && log "gateway parked (serial belongs to the demo) — re-enable anytime"
   warn "THE ROVER WILL DRIVE ITSELF after every boot — lift the wheels or run:"
   warn "  sudo systemctl disable --now cybersentinel-demo.service"
 else
   warn "pi/demo-drive.py missing — the boot demo is not installed"
+  systemctl enable --now cybersentinel-greet.service >/dev/null 2>&1 || true
+fi
+
+# One audible proof, right now, from the exact code path the boot uses. When
+# the demo is running it already spoke via demo-drive.py; saying it again here
+# would be the double-greeting, so only the standalone greeter demos audibly.
+if [[ ${DEMO_ENABLED} -eq 0 ]]; then
+  /usr/local/bin/cybersentinel-greet.sh || true
 fi
 
 if systemctl enable --now cybersentinel-gateway; then
@@ -862,7 +885,12 @@ cat <<EOF
              journalctl -u mosquitto -f
 
   All services are enabled, so a power cycle brings everything back up. At every
-  boot the Pi itself says the greeting on its speaker (cybersentinel-greet.service).
+  boot the Pi says "${CS_BOOT_GREETING:-Good morning Mohini maam}" on its speaker
+  and then drives the rover in a loop (FORWARD/LEFT/RIGHT/BACKWARD,
+  ${DEMO_STEP:-4}s each) until you stop it:
+    sudo systemctl disable --now cybersentinel-demo.service   # stop the auto-drive
+    sudo systemctl stop cybersentinel-demo.service             # stop right now
+    journalctl -u cybersentinel-demo -f                        # watch it live
 
   Speaker check:
     speaker-test -t sine -f 440 -l 1

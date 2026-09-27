@@ -59,8 +59,19 @@ def open_serial():
             time.sleep(PORT_RETRY_S)
             continue
         try:
-            ser = serial.Serial(path, BAUD, timeout=1)
-            log(f"serial link on {path}")
+            # exclusive=True keeps the gateway (if it is also running) from
+            # opening the same port: two writers interleave bytes and the Uno
+            # receives garbled half-commands — the "rover suddenly froze" bug.
+            try:
+                ser = serial.Serial(path, BAUD, timeout=1, exclusive=True)
+            except TypeError:          # very old pyserial without the kwarg
+                ser = serial.Serial(path, BAUD, timeout=1)
+                try:
+                    import fcntl, termios
+                    fcntl.ioctl(ser.fileno(), termios.TIOCEXCL)
+                except Exception:
+                    pass
+            log(f"serial link on {path} (exclusive)")
             # Opening the port resets the Uno (~2 s bootloader); let it settle,
             # then park the motors before anything moves.
             time.sleep(2.5)
