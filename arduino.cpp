@@ -39,7 +39,7 @@ void sendLog(const char *level, const char *msg);
 void reportError(const char *msg);
 void reportWarn(const char *msg);
 void scanHardwareI2C();
-void drawEye(U8G2 &display, int mode, int pupilOffset, bool blink);
+void drawEye(U8G2 &display, int mode, int pupilOffset, bool blink, bool isLeft);
 void drawMouth(int mode, int talkingFrame);
 void updateFace(unsigned long now);
 void setMotor(uint8_t a, uint8_t b, uint8_t c, uint8_t d);
@@ -207,11 +207,10 @@ void startHorn(uint16_t ms) {
 
 // ==========================================
 // DRAW EYE
-// ==========================================
-// ==========================================
-// DRAW EYE — left panel shows  >
-//            right panel shows 
-// mode / pupilOffset kept for API compat; unused now.
+//
+// Left panel shows  >   right panel shows  <
+// Both chevrons point inward, toward the face centre.
+// mode / pupilOffset are kept for API compatibility; unused now.
 // ==========================================
 void drawEye(U8G2 &display, int mode, int pupilOffset,
              bool blink, bool isLeft) {
@@ -349,7 +348,7 @@ void updateFace(unsigned long now) {
 
   // Draw both eyes
   if (oledOk & EYE_LEFT)  drawEye(leftEye,  expression, pupilOffset, blinking, true);
-if (oledOk & EYE_RIGHT) drawEye(rightEye, expression, pupilOffset, blinking, false);
+  if (oledOk & EYE_RIGHT) drawEye(rightEye, expression, pupilOffset, blinking, false);
 
   // Animate mouth while talking
   int talkingFrame = (now / 250) % 2;
@@ -467,9 +466,9 @@ void setup() {
              (oledOk & MOUTH)     ? '1' : '-');
   sendLog("info", boot);
 
-  // First frame: neutral eyes, neutral mouth
-  drawEye(leftEye, 1, 0, false);
-  drawEye(rightEye, 1, 0, false);
+  // First frame: open eyes ( > and < ), neutral mouth
+  drawEye(leftEye,  1, 0, false, true);
+  drawEye(rightEye, 1, 0, false, false);
   drawMouth(1, 0);
 }
 
