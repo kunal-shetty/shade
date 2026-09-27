@@ -26,9 +26,11 @@ import os
 import queue
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import traceback
 import urllib.request
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -1304,15 +1306,44 @@ async def publish_health_loop() -> None:
         await asyncio.sleep(10)
 
 
+def _spawn(name: str, coro) -> asyncio.Task:
+    """Start a background task that reports its own failure.
+
+    A task that raises before it starts listening dies silently: the gateway
+    keeps serving REST while the control socket is simply absent and the log says
+    nothing about it. That is exactly the state where the app reaches the API but
+    can never drive the rover, so every task gets a done-callback that prints its
+    traceback.
+    """
+    task = asyncio.create_task(coro, name=name)
+
+    def _report(t: asyncio.Task) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            print(f"[boot] {name} FAILED: {type(exc).__name__}: {exc}")
+            traceback.print_exception(type(exc), exc, exc.__traceback__)
+
+    task.add_done_callback(_report)
+    return task
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
+    # Breadcrumbs. The journal is the only view of this, and a gateway that dies
+    # here binds nothing at all - no REST, no control socket, no camera - which is
+    # impossible to diagnose from "nothing is listening" on its own.
+    print("[boot] loading the incident store")
     load_incidents()
+    print("[boot] starting the MQTT client")
     start_mqtt()
+    print("[boot] advertising over mDNS")
     start_mdns()
     tasks = [
-        asyncio.create_task(start_ws_server()),
-        asyncio.create_task(read_arduino_serial()),
-        asyncio.create_task(publish_health_loop()),
+        _spawn("ws-server", start_ws_server()),
+        _spawn("arduino-serial", read_arduino_serial()),
+        _spawn("health-publisher", publish_health_loop()),
     ]
     print(f"[api] CyberSentinel gateway v{GATEWAY_VERSION}")
     print(f"[api] REST on :{CFG.api_port}  •  discovery name: {CFG.hostname}.local")
@@ -1508,5 +1539,29 @@ async def voice_status():
     }
 
 
+def check_startup() -> int:
+    """Report what the gateway can build, without binding any port.
+
+    The fragile work happens at import time: the speaker probe, the camera
+    manager, serial discovery. If any of it raises, uvicorn never binds and
+    systemd records nothing but an exit code, so this surfaces the real error on
+    stdout where setup.sh can show it. Pair it with CS_CAMERA_ENABLE=0 so it is
+    guaranteed not to touch the capture device.
+    """
+    print(f"[check] gateway v{GATEWAY_VERSION} imported cleanly")
+    print(f"[check] speaker : {SPEAKER.describe()}")
+    print(f"[check] camera  : {CAMERA.status().get('detail')} (source={CAMERA.source})")
+    print(f"[check] arduino : {discover_serial_port(CFG.serial_port) or 'no /dev/ttyACM* or /dev/ttyUSB*'}")
+    print(f"[check] mqtt    : {CFG.mqtt_broker}:{CFG.mqtt_port}"
+          + ("" if mqtt_client is not None else "  (paho-mqtt not installed)"))
+    print(f"[check] ports   : api={CFG.api_port} ws={CFG.ws_port} camera={CFG.camera_port}")
+    print("[check] OK - the import path is sound; any remaining fault is after startup")
+    return 0
+
+
 if __name__ == "__main__":
+    # `--check` builds every subsystem and exits, so a startup failure can be read
+    # straight off the console instead of being inferred from a systemd exit code.
+    if "--check" in sys.argv[1:]:
+        sys.exit(check_startup())
     uvicorn.run(app, host="0.0.0.0", port=CFG.api_port)

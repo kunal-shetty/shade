@@ -481,10 +481,17 @@ if systemctl enable --now cybersentinel-gateway; then
   if [[ ${GW_BOUND} -eq 1 ]]; then
     log "Gateway is listening on :${API_PORT}"
   else
-    warn "The gateway did not bind :${API_PORT} within 10s — it is crash-looping."
-    warn "Its own log lines, which name the reason:"
+    warn "The gateway did not bind :${API_PORT} within 10s — it is not coming up."
+    # Import-time faults (the speaker probe, the camera manager, serial
+    # discovery) kill the process before uvicorn can bind, and systemd then
+    # records only an exit code. --check builds all of it and prints the real
+    # error; CS_CAMERA_ENABLE=0 keeps the probe off the capture device.
+    warn "Startup self-test (builds every subsystem, binds nothing):"
+    CS_CAMERA_ENABLE=0 timeout 30 "${INSTALL_DIR}/venv/bin/python" \
+      "${INSTALL_DIR}/gateway.py" --check 2>&1 | sed 's/^/      /' >&2 || true
+    warn "Its own log lines:"
     journalctl -u cybersentinel-gateway -n 40 --no-pager >&2 || true
-    warn "Run it in the foreground to see the full traceback:"
+    warn "Or watch the same thing live, in the foreground:"
     warn "  sudo -u ${RUN_USER} /opt/cybersentinel/venv/bin/python /opt/cybersentinel/gateway.py"
   fi
 else
