@@ -501,9 +501,17 @@ install -m 755 "${REPO_DIR}/pi/cybersentinel-greet.sh" /usr/local/bin/cybersenti
 sed "s/^User=pi$/User=${RUN_USER}/" "${REPO_DIR}/pi/cybersentinel-greet.service" \
   > /etc/systemd/system/cybersentinel-greet.service
 systemctl daemon-reload
-systemctl enable cybersentinel-greet.service >/dev/null 2>&1 \
-  || warn "could not enable cybersentinel-greet.service"
-systemctl restart cybersentinel-greet.service 2>/dev/null || true   # hear it once now
+if [[ -f "${REPO_DIR}/pi/demo-drive.py" ]]; then
+  # The autonomous demo greets on its speaker AFTER WiFi itself, so enabling
+  # this oneshot as well would say the line twice on every boot. It stays
+  # installed for standalone use:
+  #   sudo systemctl enable --now cybersentinel-greet.service
+  log "Boot greeting will be spoken by the boot demo (greet.service left disabled)"
+else
+  systemctl enable cybersentinel-greet.service >/dev/null 2>&1 \
+    || warn "could not enable cybersentinel-greet.service"
+  systemctl restart cybersentinel-greet.service 2>/dev/null || true   # hear it once now
+fi
 
 # ---------------------------------------------------------------------------
 # Autonomous boot demo — no app, no server: after boot the Pi greets on its

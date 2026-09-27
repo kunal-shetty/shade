@@ -18,6 +18,7 @@ motors before exiting. Tunables come from gateway.env:
 
 import glob
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -52,35 +53,91 @@ def wait_for_wifi() -> None:
     log(f"no network after {WIFI_WAIT_S}s — starting anyway")
 
 
+def wait_for_usb_serial() -> str:
+    """Block until the Uno enumerates, so the demo never speaks then stalls."""
+    while True:
+        nodes = sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*"))
+        if nodes:
+            return nodes[0]
+        log("waiting for the Arduino USB port …")
+        time.sleep(2)
+
+
 def speak(text: str) -> None:
-    for engine in ("espeak-ng", "espeak"):
-        if subprocess.run(["which", engine], capture_output=True).returncode == 0:
-            log(f"saying: {text}")
-            subprocess.run(
-                [engine, "-v", VOICE, "-p", PITCH, "-s", RATE, text],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    """Say `text` on the Pi speaker, surviving Bookworm's audio stack.
+
+    espeak-ng renders to a WAV first (it has no audio-device options of its
+    own), then every player/device is tried until one actually plays:
+      paplay (PipeWire session — the normal desktop path)
+      ffplay (setup.sh installs ffmpeg)
+      aplay on the default device, then plughw:0,0 and plughw:1,0 — these talk
+      to ALSA directly, so they work even under sudo or before PipeWire is up,
+      and they hit whichever card is the real one (jack vs HDMI).
+    """
+    wav = "/tmp/cs_greet.wav"
+    engines = [e for e in ("espeak-ng", "espeak")
+               if subprocess.run(["which", e], capture_output=True).returncode == 0]
+    if not engines:
+        log("no TTS engine installed — greeting skipped")
+        return
+
+    rendered = False
+    for engine in engines:
+        try:
+            r = subprocess.run(
+                [engine, "-v", VOICE, "-p", PITCH, "-s", RATE, "-w", wav, text],
+                capture_output=True, timeout=30,
             )
+        except Exception as exc:
+            log(f"{engine} render blew up: {exc}")
+            continue
+        if r.returncode == 0 and os.path.isfile(wav) and os.path.getsize(wav) > 1000:
+            rendered = True
+            break
+        log(f"{engine} render failed: {r.stderr.decode(errors='replace').strip()[:120]}")
+    if not rendered:
+        log("could not render speech — greeting skipped")
+        return
+
+    players = (
+        ["paplay", wav],
+        ["ffplay", "-nodisp", "-autoexit", "-loglevel", "quiet", wav],
+        ["aplay", "-q", wav],
+        ["aplay", "-q", "-D", "plughw:0,0", wav],
+        ["aplay", "-q", "-D", "plughw:1,0", wav],
+    )
+    for cmd in players:
+        if shutil.which(cmd[0]) is None:
+            continue
+        log("playing via " + " ".join(cmd))
+        try:
+            r = subprocess.run(cmd, capture_output=True, timeout=30)
+        except Exception as exc:
+            log(f"{cmd[0]} blew up: {exc}")
+            continue
+        if r.returncode == 0:
             return
-    log("no TTS engine installed — greeting skipped")
+        err = r.stderr.decode(errors='replace').strip().splitlines()
+        log(f"{cmd[0]} silent ({err[-1][:120] if err else 'exit ' + str(r.returncode)})")
+    log("no audio path worked — on the Pi run: aplay -l ; pactl info")
 
 
 def open_serial():
     import serial  # pyserial, guaranteed present in the gateway venv
+    path = wait_for_usb_serial()
     while True:
-        for path in sorted(glob.glob("/dev/ttyACM*") + glob.glob("/dev/ttyUSB*")):
-            try:
-                ser = serial.Serial(path, BAUD, timeout=1)
-                log(f"serial link on {path}")
-                # A fresh open resets the Uno (~2 s bootloader); give it air,
-                # then park the motors before the choreography starts.
-                time.sleep(2.5)
-                ser.write(b"STOP\n")
-                ser.flush()
-                return ser
-            except Exception as exc:
-                log(f"{path}: {exc}")
-        log(f"no Arduino yet — retrying in {PORT_RETRY_S}s (unplug = safe state)")
-        time.sleep(PORT_RETRY_S)
+        try:
+            ser = serial.Serial(path, BAUD, timeout=1)
+            log(f"serial link on {path}")
+            # A fresh open resets the Uno (~2 s bootloader); give it air,
+            # then park the motors before the choreography starts.
+            time.sleep(2.5)
+            ser.write(b"STOP\n")
+            ser.flush()
+            return ser
+        except Exception as exc:
+            log(f"{path}: {exc} — retrying in {PORT_RETRY_S}s")
+            time.sleep(PORT_RETRY_S)
 
 
 def main() -> int:
