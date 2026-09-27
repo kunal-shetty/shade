@@ -87,10 +87,9 @@ class Config:
     # espeak takes a base language plus an optional voice *variant*: "en+f3" is
     # a light, friendly female voice. An unknown variant falls back to the base
     # language automatically, so this is always safe to set.
-    tts_voice: str = os.getenv("CS_TTS_VOICE", "en-us+f3")  # +f* variants are female
-    tts_rate: int = int(os.getenv("CS_TTS_RATE", "135"))
-    tts_pitch: int = int(os.getenv("CS_TTS_PITCH", "65"))  # 0-99, higher = chirpier
-    tts_amplitude: int = int(os.getenv("CS_TTS_AMPLITUDE", "150"))  # 0-200, 100 = nominal
+    tts_voice: str = os.getenv("CS_TTS_VOICE", "en+f3")  # +f* variants are female
+    tts_rate: int = int(os.getenv("CS_TTS_RATE", "165"))
+    tts_pitch: int = int(os.getenv("CS_TTS_PITCH", "70"))  # 0-99, higher = chirpier
     piper_model: str = os.getenv("CS_PIPER_MODEL", "")  # e.g. /opt/piper/en_US-lessac-medium.onnx
     hostname: str = os.getenv("CS_HOSTNAME", "cybersentinel")
     enable_mdns: bool = os.getenv("CS_ENABLE_MDNS", "1") != "0"
@@ -124,7 +123,7 @@ CFG = Config()
 
 # Bumped whenever the deployed behaviour changes, so `/health` and setup.sh can
 # prove which gateway build is actually running on the Pi.
-GATEWAY_VERSION = "1.8.1"
+GATEWAY_VERSION = "1.8.0"
 
 
 # ---------------------------------------------------------------------------
@@ -249,7 +248,7 @@ class Speaker:
         if self.engine in ("espeak-ng", "espeak"):
             return subprocess.Popen(
                 [self.engine, "-v", self.voice, "-s", str(self.cfg.tts_rate),
-                 "-p", str(self.cfg.tts_pitch), "-a", str(self.cfg.tts_amplitude), text],
+                 "-p", str(self.cfg.tts_pitch), text],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
         if self.engine == "spd-say":
