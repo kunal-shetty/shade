@@ -117,6 +117,45 @@ curl -X POST http://cybersentinel.local:8000/speak \
   -H 'Content-Type: application/json' -d '{"text":"Speaker check"}'
 ```
 
+### Natural spoken replies (Groq)
+
+JEV on the phone classifies a voice command into a typed action, but it cannot
+write prose — so the app has always sent a **fixed template** with each reply
+(`"Rolling forward at 60 percent."`). Set a Groq key and the gateway rewrites
+that template into one natural sentence before speaking it:
+
+```bash
+# in /opt/cybersentinel/gateway.env
+CS_GROQ_API_KEY=gsk_...
+CS_GROQ_MODEL=llama-3.1-8b-instant
+sudo systemctl restart cybersentinel-gateway
+```
+
+Design notes worth knowing before you tune it:
+
+* **The template stays the source of truth.** The model is instructed to change
+  only the wording and never to add, remove or alter a fact, so it can sound
+  human but cannot invent a battery level. It is given the template and nothing
+  else — no sensor readings to riff on.
+* **It can only ever improve the wording, never silence a reply.** No key, no
+  network, an HTTP error, or a reply that fails validation all fall back to
+  speaking the template verbatim.
+* **It is latency-bound, not quality-bound.** Groq's LPU inference is the point:
+  a spoken reply needs sub-second turnaround. `CS_GROQ_TIMEOUT` (default 4 s)
+  bounds the damage, and the call runs in a worker thread so it never stalls the
+  gateway's event loop or the control socket.
+* **`SPEAK` gains a `source` field** in its ack — `groq` or `template` — and
+  `speaking` carries the text that was actually queued, so the app can show what
+  the Pi really said.
+
+Check which path is active:
+
+```bash
+curl -s http://cybersentinel.local:8000/health | grep -o '"reply":[^,]*'
+# "reply":"groq (llama-3.1-8b-instant)"      <- rewriting
+# "reply":"template (CS_GROQ_API_KEY not set)" <- spoken as written
+```
+
 ## 3. Arduino
 
 Flash `arduino.cpp` (install the `U8g2` library), then connect it over USB. The

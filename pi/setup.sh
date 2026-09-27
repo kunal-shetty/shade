@@ -592,7 +592,25 @@ else:
     mark = "[ok]" if data.get("arduino") == "online" else "[--]"
     detail = serial.get("error") or f"connected on {serial.get('port')}"
     print(f"    {mark} arduino : {data.get('arduino')} - {detail}")
+reply = data.get("reply")
+if reply is None:
+    print("    [!!] reply   : no reply block - the deployed gateway.py is stale")
+else:
+    mark = "[ok]" if str(reply).startswith("groq") else "[--]"
+    print(f"    {mark} reply   : {reply}")
 PY
+fi
+
+# ---------------------------------------------------------------------------
+# Groq key — without it the Pi speaks the app's plain template replies, which is
+# valid but is not what "the Pi talks back naturally" needs.
+# ---------------------------------------------------------------------------
+if ! grep -qE '^CS_GROQ_API_KEY=.+' "${INSTALL_DIR}/gateway.env" 2>/dev/null; then
+  warn "CS_GROQ_API_KEY is not set in ${INSTALL_DIR}/gateway.env."
+  warn "  Spoken replies will use the app's template wording instead of Groq."
+  warn "  To enable natural replies: add the line then restart the service"
+  warn "    CS_GROQ_API_KEY=<your key from console.groq.com/keys>"
+  warn "    sudo systemctl restart cybersentinel-gateway"
 fi
 
 # ---------------------------------------------------------------------------

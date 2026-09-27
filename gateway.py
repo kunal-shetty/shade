@@ -7,6 +7,7 @@ Bridges the phone app to the hardware:
   * MQTT       :1883  telemetry fan-out (Mosquitto, websockets listener enabled)
   * Serial     USB    Arduino motor + buzzer node
   * Speaker    GPIO/USB text-to-speech (espeak-ng / piper)
+  * Groq       optional: rewrites each spoken reply into natural wording
 
 Everything is zero-config: the phone discovers this Pi on the shared WiFi via
 mDNS (`cybersentinel.local`) or a subnet scan of the gateway's HTTP health
@@ -109,13 +110,20 @@ class Config:
     # Optional v4l2 control applied for night mode, e.g. "exposure_auto=1"
     camera_night_ctrl: str = os.getenv("CS_CAMERA_NIGHT_CTRL", "")
     record_dir: Path = Path(os.getenv("CS_RECORD_DIR", "recordings"))
+    # Groq rewrites the phone's spoken-reply template into natural wording.
+    # An empty key means the feature is simply off and the template is spoken
+    # verbatim, so this degrades to the previous behaviour rather than breaking
+    # the speaker.
+    groq_api_key: str = os.getenv("CS_GROQ_API_KEY", "")
+    groq_model: str = os.getenv("CS_GROQ_MODEL", "llama-3.1-8b-instant")
+    groq_timeout: int = int(os.getenv("CS_GROQ_TIMEOUT", "4"))
 
 
 CFG = Config()
 
 # Bumped whenever the deployed behaviour changes, so `/health` and setup.sh can
 # prove which gateway build is actually running on the Pi.
-GATEWAY_VERSION = "1.6.0"
+GATEWAY_VERSION = "1.7.0"
 
 
 # ---------------------------------------------------------------------------
@@ -269,6 +277,115 @@ class Speaker:
 
 
 SPEAKER = Speaker(CFG)
+
+
+# ---------------------------------------------------------------------------
+# REPLY — natural spoken wording, written by Groq
+#
+# JEV on the phone classifies a spoken command into a typed action, but it cannot
+# write prose, so the app sends a deterministic template alongside each SPEAK
+# ("Rolling forward at 60 percent."). Groq turns that sentence into one that
+# sounds like a person, which is the one thing JEV cannot do.
+#
+# Two rules this will not break:
+#   * the template is the ONLY input, and the model is forbidden from adding or
+#     altering facts. A rover that invents a battery level is worse than one that
+#     sounds robotic, so the template stays the source of truth.
+#   * every failure path returns the original text, so a missing key, a dead
+#     network or a bad reply degrades the wording instead of silencing the reply.
+#
+# Calls Groq's OpenAI-compatible endpoint through stdlib urllib: the gateway is
+# deliberately near-dependency-free and this needs nothing installed.
+# ---------------------------------------------------------------------------
+
+GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+REPLY_SYSTEM_PROMPT = (
+    "You rewrite status lines that a small security robot speaks aloud. Rules:\n"
+    "1. Output ONE sentence of at most 22 words, natural and friendly.\n"
+    "2. Change ONLY the wording. Never add, remove or alter a fact, number, "
+    "place or name: you have no other source of truth.\n"
+    "3. No markdown, no emoji, no quotation marks, no preamble, no hedging.\n"
+    "4. Output the sentence itself and nothing else."
+)
+
+
+class ReplyWriter:
+    """Rewrites a status template into natural speech, via Groq.
+
+    Used on the SPEAK path only. Without a key, or on any failure, the original
+    text is returned unchanged. The blocking HTTP call is pushed to a worker
+    thread so it can never stall the gateway's event loop.
+    """
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.enabled = bool(cfg.groq_api_key)
+        self.model = cfg.groq_model
+
+    def describe(self) -> str:
+        if not self.enabled:
+            return "template (CS_GROQ_API_KEY not set)"
+        return f"groq ({self.model})"
+
+    def _request(self, text: str) -> str:
+        body = json.dumps({
+            "model": self.model,
+            "temperature": 0.4,
+            "max_tokens": 80,
+            "messages": [
+                {"role": "system", "content": REPLY_SYSTEM_PROMPT},
+                {"role": "user", "content": f"Rewrite this line:\n{text}"},
+            ],
+        }).encode("utf-8")
+        req = urllib.request.Request(
+            GROQ_URL,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {self.cfg.groq_api_key}",
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": "cybersentinel-gateway",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=self.cfg.groq_timeout) as resp:
+            payload = json.loads(resp.read().decode("utf-8", "replace"))
+        return str(payload["choices"][0]["message"]["content"] or "")
+
+    async def natural(self, text: str) -> tuple[str, str]:
+        """Return (what to speak, source) where source is groq or template."""
+        text = (text or "").strip()
+        if not text or not self.enabled:
+            return text, "template"
+        try:
+            raw = await asyncio.to_thread(self._request, text)
+        except Exception as exc:
+            # Never let wording take the reply down with it. A 401 from a bad key
+            # and a dropped connection read the same way here, and both mean
+            # "speak the template".
+            print(f"[reply] groq unavailable ({exc}); speaking the template instead")
+            return text, "template"
+        cleaned = self._clean(raw)
+        if not cleaned:
+            print("[reply] groq returned nothing usable; speaking the template instead")
+            return text, "template"
+        return cleaned, "groq"
+
+    @staticmethod
+    def _clean(raw: str) -> str:
+        """Strip the wrappers models add, and refuse an obvious runaway."""
+        line = " ".join((raw or "").strip().strip('"').strip("'").split())
+        if not line or len(line) > 240:
+            return ""
+        return line
+
+
+REPLY = ReplyWriter(CFG)
+if REPLY.enabled:
+    print(f"[reply] spoken replies rewritten by {REPLY.describe()}")
+else:
+    print("[reply] CS_GROQ_API_KEY not set — spoken replies use the app's template")
 
 
 # ---------------------------------------------------------------------------
@@ -1161,11 +1278,15 @@ async def handle_command(data: dict) -> dict:
         return {"type": "ack", "cmd": cmd}
 
     if cmd == "SPEAK":
+        # The app owns the facts (it built the template from live rover state),
+        # so Groq only rewrites the wording. `source` tells the app which one it
+        # heard, and `speaking` carries the text that was actually queued.
         text = str(data.get("text", ""))[:500]
+        spoken, source = await REPLY.natural(text)
         if not SPEAKER.engine:
-            print(f"[ws] SPEAK ignored — no TTS engine available (text: {text[:60]!r})")
-        SPEAKER.say(text)
-        return {"type": "ack", "cmd": cmd, "speaking": text}
+            print(f"[ws] SPEAK ignored — no TTS engine available (text: {spoken[:60]!r})")
+        SPEAKER.say(spoken)
+        return {"type": "ack", "cmd": cmd, "speaking": spoken, "source": source}
 
     if cmd == "TTS_STOP":
         SPEAKER.stop()
@@ -1415,6 +1536,7 @@ async def health():
         "camera_info": CAMERA.status(),
         "pi": pi_stats(),
         "speaker": SPEAKER.describe(),
+        "reply": REPLY.describe(),
         "uptime": int(time.time()),
     }
 
@@ -1480,8 +1602,9 @@ async def speak(body: dict | None = None):
     text = str((body or {}).get("text", ""))[:500]
     if not text:
         raise HTTPException(status_code=422, detail="text is required")
-    SPEAKER.say(text)
-    return {"ok": True}
+    spoken, source = await REPLY.natural(text)
+    SPEAKER.say(spoken)
+    return {"ok": True, "speaking": spoken, "source": source}
 
 
 @app.post("/fcm/register")
