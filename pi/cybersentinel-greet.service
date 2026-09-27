@@ -1,0 +1,10 @@
+[Unit]
+Description=CyberSentinel boot greeting on the Pi speaker
+Wants=sound.target
+After=sound.target multi-user.target
+
+[Service]
+Type=oneshot
+User=minnie_1105
+EnvironmentFile=-/opt/cybersentinel/gateway.env
+ExecStart=/usr/local/bin/cybersentinel-greet.sh

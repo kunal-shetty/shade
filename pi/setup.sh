@@ -317,6 +317,16 @@ mkdir -p "${INSTALL_DIR}"
 install -m 644 "${REPO_DIR}/gateway.py" "${INSTALL_DIR}/gateway.py"
 [[ -f "${INSTALL_DIR}/gateway.env" ]] || install -m 644 "${REPO_DIR}/pi/gateway.env.example" "${INSTALL_DIR}/gateway.env"
 
+# Vanilla web console, served by the gateway at http://<pi>:8000/app
+if [[ -d "${REPO_DIR}/pi/webapp" ]]; then
+  mkdir -p "${INSTALL_DIR}/webapp"
+  install -m 644 "${REPO_DIR}/pi/webapp/"*.{html,css,js} "${INSTALL_DIR}/webapp/" 2>/dev/null \
+    || install -m 644 "${REPO_DIR}/pi/webapp/index.html" "${REPO_DIR}/pi/webapp/style.css" "${REPO_DIR}/pi/webapp/app.js" "${INSTALL_DIR}/webapp/"
+  log "Web console deployed — http://$(hostname -I 2>/dev/null | awk '{print $1}'):${API_PORT:-8000}/app"
+else
+  warn "pi/webapp missing — the browser console will not be served"
+fi
+
 # Every port below is read from the DEPLOYED env file, so the checks in this
 # script can never drift from the numbers the gateway actually binds.
 read_env_port() {
@@ -487,6 +497,21 @@ free_gateway_ports() {
 }
 
 free_gateway_ports
+
+# ---------------------------------------------------------------------------
+# Boot greeting — the Pi says "Good morning Mohini maam" on its own speaker at
+# every power-up, straight from systemd, before any app or browser is involved.
+# A oneshot unit runs a tiny espeak script; the line and delay are tunable via
+# CS_BOOT_GREETING / CS_BOOT_GREET_DELAY in gateway.env (optional, defaults).
+# ---------------------------------------------------------------------------
+log "Installing the boot greeting service"
+install -m 755 "${REPO_DIR}/pi/cybersentinel-greet.sh" /usr/local/bin/cybersentinel-greet.sh
+sed "s/^User=pi$/User=${RUN_USER}/" "${REPO_DIR}/pi/cybersentinel-greet.service" \
+  > /etc/systemd/system/cybersentinel-greet.service
+systemctl daemon-reload
+systemctl enable cybersentinel-greet.service >/dev/null 2>&1 \
+  || warn "could not enable cybersentinel-greet.service"
+systemctl restart cybersentinel-greet.service 2>/dev/null || true   # hear it once now
 
 if systemctl enable --now cybersentinel-gateway; then
   log "cybersentinel-gateway is running"
@@ -788,6 +813,9 @@ fi
 IP="$(hostname -I | awk '{print $1}')"
 cat <<EOF
 
+  Web console (no app needed — open in any browser on the WiFi):
+    http://${IP}:${API_PORT}/app
+
   App connection  (Settings -> Connection -> "Pi IP Address"):
     host          ${IP}
     ws port       ${WS_PORT}     joystick + buttons (control socket)
@@ -815,11 +843,15 @@ cat <<EOF
   Logs:      journalctl -u cybersentinel-gateway -f
              journalctl -u mosquitto -f
 
-  All services are enabled, so a power cycle brings everything back up.
+  All services are enabled, so a power cycle brings everything back up. At every
+  boot the Pi itself says the greeting on its speaker (cybersentinel-greet.service).
 
   Speaker check:
     speaker-test -t sine -f 440 -l 1
     espeak-ng "CyberSentinel online"
+  Boot greeting (say it now / change the line):
+    systemctl restart cybersentinel-greet.service
+    # the line it says:  CS_BOOT_GREETING in ${INSTALL_DIR}/gateway.env
 
   Camera check:
     ${INSTALL_DIR}/venv/bin/python -c 'from picamera2 import Picamera2; print(Picamera2.global_camera_info())'

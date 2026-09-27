@@ -49,7 +49,7 @@ interface SettingsState {
  * fine on a PC through Avahi) dies on the phone with
  * `java.net.UnknownHostException` before a single packet leaves the device.
  */
-export const DEFAULT_HOST = '192.168.0.115';
+export const DEFAULT_HOST = '192.168.0.115'; // Pi changed networks — update here AND in Settings → Connection on your devices
 
 export const isIpv4 = (host: string): boolean =>
   /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.test(host.trim());
