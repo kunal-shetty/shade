@@ -342,7 +342,7 @@ class ReplyWriter:
             GROQ_URL,
             data=body,
             headers={
-                "Authorization": f"Bearer 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",
+                "Authorization": f"Bearer {self.cfg.groq_api_key}",
                 "Content-Type": "application/json",
                 "Accept": "application/json",
                 "User-Agent": "cybersentinel-gateway",
