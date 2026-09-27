@@ -505,6 +505,27 @@ systemctl enable cybersentinel-greet.service >/dev/null 2>&1 \
   || warn "could not enable cybersentinel-greet.service"
 systemctl restart cybersentinel-greet.service 2>/dev/null || true   # hear it once now
 
+# ---------------------------------------------------------------------------
+# Autonomous boot demo — no app, no server: after boot the Pi greets on its
+# speaker, then drives the rover in a fixed loop (FORWARD -> LEFT -> RIGHT ->
+# BACKWARD, CS_DEMO_STEP seconds each) by writing straight to the Arduino's
+# serial port. Always STOPs on shutdown/reboot/timeout.
+# Tunables in gateway.env:  CS_BOOT_GREETING, CS_DEMO_STEP  (see the example).
+# ---------------------------------------------------------------------------
+if [[ -f "${REPO_DIR}/pi/demo-drive.py" ]]; then
+  log "Installing the autonomous boot demo"
+  install -m 644 "${REPO_DIR}/pi/demo-drive.py" "${INSTALL_DIR}/demo-drive.py"
+  sed "s/^User=minnie_1105$/User=${RUN_USER}/" "${REPO_DIR}/pi/cybersentinel-demo.service" \
+    > /etc/systemd/system/cybersentinel-demo.service
+  systemctl daemon-reload
+  systemctl enable --now cybersentinel-demo.service \
+    || warn "could not start cybersentinel-demo.service"
+  warn "THE ROVER WILL DRIVE ITSELF after every boot — lift the wheels or run:"
+  warn "  sudo systemctl disable --now cybersentinel-demo.service"
+else
+  warn "pi/demo-drive.py missing — the boot demo is not installed"
+fi
+
 if systemctl enable --now cybersentinel-gateway; then
   log "cybersentinel-gateway is running"
 

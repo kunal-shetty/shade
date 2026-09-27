@@ -1,0 +1,15 @@
+[Unit]
+Description=CyberSentinel autonomous boot demo (greeting + drive loop)
+Wants=network-online.target
+After=network-online.target cybersentinel-greet.service cybersentinel-gateway.service
+
+[Service]
+Type=simple
+User=minnie_1105
+EnvironmentFile=-/opt/cybersentinel/gateway.env
+ExecStart=/opt/cybersentinel/venv/bin/python /opt/cybersentinel/demo-drive.py
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
